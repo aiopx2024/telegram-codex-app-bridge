@@ -1,9 +1,21 @@
 import crypto from 'node:crypto';
 import type { AppConfig } from '../config.js';
+import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { PendingApprovalRecord, RuntimeStatus, ThreadBinding } from '../types.js';
+import type { AppLocale, ModelInfo, PendingApprovalRecord, ReasoningEffortValue, RuntimeStatus, ThreadBinding, ThreadSessionState } from '../types.js';
 import { parseCommand } from './commands.js';
+import {
+  buildModelSettingsKeyboard,
+  buildThreadsKeyboard,
+  clampEffortToModel,
+  formatModelSettingsMessage,
+  formatThreadsMessage,
+  formatWhereMessage,
+  normalizeRequestedEffort,
+  resolveCurrentModel,
+  resolveRequestedModel,
+} from './presentation.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import { chunkTelegramMessage, sanitizeTelegramPreview } from '../telegram/text.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest } from '../codex_app/client.js';
@@ -16,6 +28,7 @@ interface ActiveTurn {
   previewMessageId: number;
   buffer: string;
   finalText: string | null;
+  interruptRequested: boolean;
   lastFlushAt: number;
   resolver: () => void;
 }
@@ -100,15 +113,16 @@ export class BridgeController {
   }
 
   private async handleText(event: TelegramTextEvent): Promise<void> {
+    const locale = this.localeForChat(event.chatId, event.languageCode);
     this.store.insertAudit('inbound', event.chatId, 'telegram.message', event.text);
     const command = parseCommand(event.text);
     if (command) {
-      await this.handleCommand(event, command.name, command.args);
+      await this.handleCommand(event, locale, command.name, command.args);
       return;
     }
 
-    if ([...this.activeTurns.values()].some(turn => turn.chatId === event.chatId)) {
-      await this.bot.sendMessage(event.chatId, 'Another turn is already running. Use /interrupt or wait.');
+    if (this.findActiveTurn(event.chatId)) {
+      await this.bot.sendMessage(event.chatId, t(locale, 'another_turn_running'));
       return;
     }
 
@@ -117,89 +131,89 @@ export class BridgeController {
       ? await this.ensureThreadReady(event.chatId, existingBinding)
       : await this.createBinding(event.chatId, null);
     await this.bot.sendTyping(event.chatId);
-    const previewMessageId = await this.bot.sendMessage(event.chatId, 'Working...');
+    const previewMessageId = await this.bot.sendMessage(event.chatId, t(locale, 'working'));
     const turnState = await this.startTurnWithRecovery(event.chatId, binding, event.text);
     await this.registerActiveTurn(event.chatId, turnState.threadId, turnState.turnId, previewMessageId);
   }
 
-  private async handleCommand(event: TelegramTextEvent, name: string, args: string[]): Promise<void> {
+  private async handleCommand(event: TelegramTextEvent, locale: AppLocale, name: string, args: string[]): Promise<void> {
     switch (name) {
       case 'start':
       case 'help': {
         await this.bot.sendMessage(event.chatId, [
-          'Commands:',
+          t(locale, 'help_commands_title'),
           '/help',
           '/status',
-          '/threads',
+          '/threads [query]',
           '/open <n>',
           '/new [cwd]',
+          '/models',
           '/reveal',
           '/where',
           '/interrupt',
-          'Plain text continues the current thread, or creates one if none is bound.'
+          t(locale, 'help_advanced_aliases'),
+          t(locale, 'help_plain_text_hint'),
         ].join('\n'));
         return;
       }
       case 'status': {
         const binding = this.store.getBinding(event.chatId);
+        const settings = this.store.getChatSettings(event.chatId);
         const lines = [
-          `Connected: ${this.app.isConnected() ? 'yes' : 'no'}`,
-          `User agent: ${this.app.getUserAgent() ?? 'unknown'}`,
-          `Current thread: ${binding?.threadId ?? 'none'}`,
-          `Sync on /open: ${this.config.codexAppSyncOnOpen ? 'yes' : 'no'}`,
-          `Sync on turn complete: ${this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no'}`,
-          `Pending approvals: ${this.store.countPendingApprovals()}`,
-          `Active turns: ${this.activeTurns.size}`,
+          t(locale, 'status_connected', { value: t(locale, this.app.isConnected() ? 'yes' : 'no') }),
+          t(locale, 'status_user_agent', { value: this.app.getUserAgent() ?? t(locale, 'unknown') }),
+          t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
+          t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+          t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+          t(locale, 'status_sync_on_open', { value: t(locale, this.config.codexAppSyncOnOpen ? 'yes' : 'no') }),
+          t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
+          t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
+          t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
         await this.bot.sendMessage(event.chatId, lines.join('\n'));
         return;
       }
       case 'where': {
-        const binding = this.store.getBinding(event.chatId);
-        if (!binding) {
-          await this.bot.sendMessage(event.chatId, 'No thread is currently bound. Send a message or use /new.');
-          return;
-        }
-        const thread = await this.app.readThread(binding.threadId, false);
-        await this.bot.sendMessage(event.chatId, [
-          `Thread: ${binding.threadId}`,
-          `CWD: ${thread?.cwd ?? binding.cwd ?? this.config.defaultCwd}`,
-          `Preview: ${thread?.preview || '(empty)'}`,
-          `Updated: ${formatUnix(thread?.updatedAt)}`,
-        ].join('\n'));
+        await this.showWherePanel(event.chatId, undefined, locale);
         return;
       }
       case 'threads': {
-        const threads = await this.app.listThreads(this.config.threadListLimit);
-        const cached = threads.map((thread: any) => ({
-          threadId: String(thread.id),
-          preview: String(thread.preview || '(empty)'),
-          cwd: thread.cwd ? String(thread.cwd) : null,
-          updatedAt: Number(thread.updatedAt || 0),
-        }));
-        this.store.cacheThreadList(event.chatId, cached);
-        const lines = cached.length === 0
-          ? ['No recent threads.']
-          : cached.map((thread, index) => `${index + 1}. ${thread.preview.slice(0, 80)}\n   ${thread.threadId}\n   ${thread.cwd ?? '(no cwd)'}`);
-        await this.bot.sendMessage(event.chatId, lines.join('\n'));
+        const searchTerm = args.join(' ').trim() || null;
+        await this.showThreadsPanel(event.chatId, undefined, searchTerm, locale);
         return;
       }
       case 'open': {
         const target = Number.parseInt(args[0] || '', 10);
         if (!Number.isFinite(target)) {
-          await this.bot.sendMessage(event.chatId, 'Usage: /open <n>');
+          await this.bot.sendMessage(event.chatId, t(locale, 'usage_open'));
           return;
         }
         const thread = this.store.getCachedThread(event.chatId, target);
         if (!thread) {
-          await this.bot.sendMessage(event.chatId, 'Unknown cached thread. Run /threads first.');
+          await this.bot.sendMessage(event.chatId, t(locale, 'unknown_cached_thread'));
           return;
         }
-        this.store.setBinding(event.chatId, thread.threadId, thread.cwd);
-        const lines = [`Bound to thread ${thread.threadId}`];
+        let binding: ThreadBinding;
+        try {
+          binding = await this.bindCachedThread(event.chatId, thread.threadId);
+        } catch (error) {
+          if (isThreadNotFoundError(error)) {
+            await this.bot.sendMessage(event.chatId, t(locale, 'cached_thread_unavailable'));
+            return;
+          }
+          throw error;
+        }
+        const settings = this.store.getChatSettings(event.chatId);
+        const lines = [
+          t(locale, 'bound_to_thread', { threadId: binding.threadId }),
+          t(locale, 'line_title', { value: thread.name || thread.preview || t(locale, 'empty') }),
+          t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+          t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+          t(locale, 'line_cwd', { value: binding.cwd ?? this.config.defaultCwd }),
+        ];
         if (this.config.codexAppSyncOnOpen) {
-          const revealError = await this.tryRevealThread(event.chatId, thread.threadId, 'open');
-          lines.push(revealError ? `Codex.app sync failed: ${revealError}` : 'Opened in Codex.app.');
+          const revealError = await this.tryRevealThread(event.chatId, binding.threadId, 'open');
+          lines.push(revealError ? t(locale, 'codex_sync_failed', { error: revealError }) : t(locale, 'opened_in_codex'));
         }
         await this.bot.sendMessage(event.chatId, lines.join('\n'));
         return;
@@ -207,56 +221,95 @@ export class BridgeController {
       case 'new': {
         const cwd = args.join(' ').trim() || this.config.defaultCwd;
         const binding = await this.createBinding(event.chatId, cwd);
-        await this.bot.sendMessage(event.chatId, `Started new thread ${binding.threadId}\nCWD: ${binding.cwd ?? cwd}`);
+        const settings = this.store.getChatSettings(event.chatId);
+        await this.bot.sendMessage(event.chatId, [
+          t(locale, 'started_new_thread', { threadId: binding.threadId }),
+          t(locale, 'line_cwd', { value: binding.cwd ?? cwd }),
+          t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+          t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+        ].join('\n'));
+        return;
+      }
+      case 'model': {
+        await this.handleModelCommand(event, locale, args);
+        return;
+      }
+      case 'models': {
+        await this.showModelSettingsPanel(event.chatId, undefined, locale);
+        return;
+      }
+      case 'effort': {
+        await this.handleEffortCommand(event, locale, args);
         return;
       }
       case 'reveal':
       case 'focus': {
         const binding = this.store.getBinding(event.chatId);
         if (!binding) {
-          await this.bot.sendMessage(event.chatId, 'No thread is currently bound. Use /open, /new, or send a message first.');
+          await this.bot.sendMessage(event.chatId, t(locale, 'no_thread_bound_reveal'));
           return;
         }
         const readyBinding = await this.ensureThreadReady(event.chatId, binding);
         const revealError = await this.tryRevealThread(event.chatId, readyBinding.threadId, 'reveal');
         if (revealError) {
-          await this.bot.sendMessage(event.chatId, `Failed to open Codex.app thread: ${revealError}`);
+          await this.bot.sendMessage(event.chatId, t(locale, 'failed_open_codex', { error: revealError }));
           return;
         }
-        await this.bot.sendMessage(event.chatId, `Opened thread ${readyBinding.threadId} in Codex.app.`);
+        await this.bot.sendMessage(event.chatId, t(locale, 'opened_thread_in_codex', { threadId: readyBinding.threadId }));
         return;
       }
       case 'interrupt': {
-        const active = [...this.activeTurns.values()].find(turn => turn.chatId === event.chatId);
+        const active = this.findActiveTurn(event.chatId);
         if (!active) {
-          await this.bot.sendMessage(event.chatId, 'No active turn to interrupt.');
+          await this.bot.sendMessage(event.chatId, t(locale, 'no_active_turn'));
           return;
         }
-        await this.app.interruptTurn(active.threadId, active.turnId);
-        await this.bot.sendMessage(event.chatId, `Interrupt requested for ${active.turnId}`);
+        await this.requestInterrupt(active);
+        await this.bot.sendMessage(event.chatId, t(locale, 'interrupt_requested_for', { turnId: active.turnId }));
         return;
       }
       default: {
-        await this.bot.sendMessage(event.chatId, `Unknown command: /${name}`);
+        await this.bot.sendMessage(event.chatId, t(locale, 'unknown_command', { name }));
       }
     }
   }
 
   private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
+    const locale = this.localeForChat(event.chatId, event.languageCode);
+    const interruptMatch = /^turn:interrupt:(.+)$/.exec(event.data);
+    if (interruptMatch) {
+      await this.handleTurnInterruptCallback(event, interruptMatch[1]!, locale);
+      return;
+    }
+    const threadMatch = /^thread:open:(.+)$/.exec(event.data);
+    if (threadMatch) {
+      await this.handleThreadOpenCallback(event, threadMatch[1]!, locale);
+      return;
+    }
+    const navMatch = /^nav:(models|threads|reveal)$/.exec(event.data);
+    if (navMatch) {
+      await this.handleNavigationCallback(event, navMatch[1]! as 'models' | 'threads' | 'reveal', locale);
+      return;
+    }
+    const settingsMatch = /^settings:(model|effort):(.+)$/.exec(event.data);
+    if (settingsMatch) {
+      await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort', settingsMatch[2]!, locale);
+      return;
+    }
     const match = /^approval:([a-f0-9]+):(accept|session|deny)$/.exec(event.data);
     if (!match) {
-      await this.bot.answerCallback(event.callbackQueryId, 'Unsupported action');
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
     const localId = match[1]!;
     const action = match[2]! as ApprovalAction;
     const approval = this.store.getPendingApproval(localId);
     if (!approval || approval.resolvedAt) {
-      await this.bot.answerCallback(event.callbackQueryId, 'Approval already resolved');
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'approval_already_resolved'));
       return;
     }
     if (approval.chatId !== event.chatId || (approval.messageId !== null && approval.messageId !== event.messageId)) {
-      await this.bot.answerCallback(event.callbackQueryId, 'Approval does not match this message');
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'approval_mismatch'));
       return;
     }
 
@@ -264,15 +317,45 @@ export class BridgeController {
     await this.app.respond(approval.serverRequestId, result);
     this.store.markApprovalResolved(localId);
     this.clearApprovalTimer(localId);
-    await this.bot.answerCallback(event.callbackQueryId, 'Decision recorded');
+    await this.bot.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     if (approval.messageId !== null) {
-      await this.bot.editMessage(event.chatId, approval.messageId, renderApprovalMessage(approval, action));
+      await this.bot.editMessage(event.chatId, approval.messageId, renderApprovalMessage(locale, approval, action));
     }
     this.updateStatus();
   }
 
   private async handleNotification(notification: JsonRpcNotification): Promise<void> {
     switch (notification.method) {
+      case 'sessionConfigured': {
+        const params = notification.params as any;
+        const threadId = String(params.session_id || '');
+        if (!threadId) return;
+        const chatId = this.findChatByThread(threadId);
+        if (!chatId) return;
+        const binding = this.store.getBinding(chatId);
+        const cwd = params.cwd ? String(params.cwd) : binding?.cwd ?? null;
+        this.store.setBinding(chatId, threadId, cwd);
+        const current = this.store.getChatSettings(chatId);
+        const preserveDefaultModel = current !== null && current.model === null;
+        const preserveDefaultEffort = current !== null && current.reasoningEffort === null;
+        this.store.setChatSettings(
+          chatId,
+          preserveDefaultModel
+            ? null
+            : params.model
+              ? String(params.model)
+              : current?.model ?? null,
+          preserveDefaultEffort
+            ? null
+            : params.reasoning_effort === undefined
+              ? current?.reasoningEffort ?? null
+              : params.reasoning_effort === null
+                ? null
+                : String(params.reasoning_effort) as ReasoningEffortValue,
+        );
+        this.updateStatus();
+        return;
+      }
       case 'item/agentMessage/delta': {
         const { turnId, delta } = notification.params as { turnId: string; delta: string };
         const active = this.activeTurns.get(turnId);
@@ -286,7 +369,7 @@ export class BridgeController {
         if (params.item?.type !== 'agentMessage') return;
         const active = this.activeTurns.get(String(params.turnId));
         if (!active) return;
-        active.finalText = String(params.item.text || active.buffer || 'Completed.');
+        active.finalText = String(params.item.text || active.buffer || t(this.localeForChat(active.chatId), 'completed'));
         return;
       }
       case 'turn/completed': {
@@ -329,7 +412,8 @@ export class BridgeController {
       case 'item/commandExecution/requestApproval': {
         const params = request.params as any;
         const approval = this.createApprovalRecord('command', request.id, params);
-        const messageId = await this.bot.sendMessage(approval.chatId, renderApprovalMessage(approval), approvalKeyboard(approval.localId));
+        const locale = this.localeForChat(approval.chatId);
+        const messageId = await this.bot.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
         this.store.updatePendingApprovalMessage(approval.localId, messageId);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
@@ -338,7 +422,8 @@ export class BridgeController {
       case 'item/fileChange/requestApproval': {
         const params = request.params as any;
         const approval = this.createApprovalRecord('fileChange', request.id, params);
-        const messageId = await this.bot.sendMessage(approval.chatId, renderApprovalMessage(approval), approvalKeyboard(approval.localId));
+        const locale = this.localeForChat(approval.chatId);
+        const messageId = await this.bot.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
         this.store.updatePendingApprovalMessage(approval.localId, messageId);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
@@ -348,7 +433,7 @@ export class BridgeController {
         const params = request.params as any;
         const chatId = this.findChatByThread(params.threadId);
         if (chatId) {
-          await this.bot.sendMessage(chatId, 'Codex requested interactive tool input, but this bridge only supports approvals in v1. Returning empty answers.');
+          await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'interactive_input_unsupported'));
         }
         await this.app.respond(request.id, { answers: {} });
         return;
@@ -359,20 +444,28 @@ export class BridgeController {
     }
   }
 
-  private async createBinding(chatId: string, requestedCwd: string | null): Promise<{ threadId: string; cwd: string | null }> {
+  private async createBinding(chatId: string, requestedCwd: string | null): Promise<ThreadBinding> {
     const cwd = requestedCwd || this.config.defaultCwd;
-    const thread = await this.app.startThread(cwd, this.config.defaultApprovalPolicy);
-    const threadId = String(thread.id);
-    const resolvedCwd = String(thread.cwd || cwd);
-    this.store.setBinding(chatId, threadId, resolvedCwd);
-    this.attachedThreads.add(threadId);
-    this.updateStatus();
-    return { threadId, cwd: resolvedCwd };
+    const settings = this.store.getChatSettings(chatId);
+    const session = await this.app.startThread({
+      cwd,
+      approvalPolicy: this.config.defaultApprovalPolicy,
+      model: settings?.model ?? null,
+    });
+    return this.storeThreadSession(chatId, session, 'seed');
   }
 
   private async startTurnWithRecovery(chatId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, text: string): Promise<{ threadId: string; turnId: string }> {
+    const settings = this.store.getChatSettings(chatId);
     try {
-      const turn = await this.app.startTurn(binding.threadId, text, this.config.defaultApprovalPolicy, binding.cwd ?? this.config.defaultCwd);
+      const turn = await this.app.startTurn({
+        threadId: binding.threadId,
+        text,
+        approvalPolicy: this.config.defaultApprovalPolicy,
+        cwd: binding.cwd ?? this.config.defaultCwd,
+        model: settings?.model ?? null,
+        effort: settings?.reasoningEffort ?? null,
+      });
       return { threadId: binding.threadId, turnId: turn.id };
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
@@ -380,42 +473,71 @@ export class BridgeController {
       }
       this.logger.warn('codex.turn_thread_not_found', { chatId, threadId: binding.threadId });
       const replacement = await this.createBinding(chatId, binding.cwd ?? this.config.defaultCwd);
-      await this.bot.sendMessage(chatId, `Current thread was unavailable. Continued in a new thread ${replacement.threadId}.`);
-      const turn = await this.app.startTurn(replacement.threadId, text, this.config.defaultApprovalPolicy, replacement.cwd ?? this.config.defaultCwd);
+      await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
+      const nextSettings = this.store.getChatSettings(chatId);
+      const turn = await this.app.startTurn({
+        threadId: replacement.threadId,
+        text,
+        approvalPolicy: this.config.defaultApprovalPolicy,
+        cwd: replacement.cwd ?? this.config.defaultCwd,
+        model: nextSettings?.model ?? null,
+        effort: nextSettings?.reasoningEffort ?? null,
+      });
       return { threadId: replacement.threadId, turnId: turn.id };
     }
   }
 
   private async registerActiveTurn(chatId: string, threadId: string, turnId: string, previewMessageId: number): Promise<void> {
-    await new Promise<void>((resolve) => {
-      this.activeTurns.set(turnId, {
-        chatId,
-        threadId,
-        turnId,
-        previewMessageId,
-        buffer: '',
-        finalText: null,
-        lastFlushAt: 0,
-        resolver: resolve,
-      });
-      this.updateStatus();
+    let resolveTurn!: () => void;
+    const waitForTurn = new Promise<void>((resolve) => {
+      resolveTurn = resolve;
     });
+    const active: ActiveTurn = {
+      chatId,
+      threadId,
+      turnId,
+      previewMessageId,
+      buffer: '',
+      finalText: null,
+      interruptRequested: false,
+      lastFlushAt: 0,
+      resolver: resolveTurn,
+    };
+    this.activeTurns.set(turnId, active);
+    this.updateStatus();
+    try {
+      await this.bot.editMessage(
+        chatId,
+        previewMessageId,
+        this.renderActivePreview(active),
+        activeTurnKeyboard(this.localeForChat(chatId), turnId),
+      );
+    } catch (error) {
+      this.logger.warn('telegram.preview_keyboard_attach_failed', { error: String(error), turnId });
+    }
+    await waitForTurn;
   }
 
   private async flushPreview(active: ActiveTurn, force: boolean): Promise<void> {
     const now = Date.now();
     if (!force && now - active.lastFlushAt < this.config.telegramPreviewThrottleMs) return;
-    const text = sanitizeTelegramPreview(active.buffer || active.finalText || 'Working...');
+    const text = this.renderActivePreview(active);
     active.lastFlushAt = now;
     try {
-      await this.bot.editMessage(active.chatId, active.previewMessageId, text);
+      await this.bot.editMessage(
+        active.chatId,
+        active.previewMessageId,
+        text,
+        active.interruptRequested ? [] : activeTurnKeyboard(this.localeForChat(active.chatId), active.turnId),
+      );
     } catch (error) {
       this.logger.warn('telegram.preview_edit_failed', { error: String(error) });
     }
   }
 
   private async completeTurn(active: ActiveTurn): Promise<void> {
-    const finalChunks = chunkTelegramMessage(active.finalText || active.buffer || 'Completed.');
+    const locale = this.localeForChat(active.chatId);
+    const finalChunks = chunkTelegramMessage(active.finalText || active.buffer || t(locale, 'completed'));
     for (const chunk of finalChunks) {
       await this.bot.sendMessage(active.chatId, chunk);
     }
@@ -425,7 +547,7 @@ export class BridgeController {
     } catch (error) {
       this.logger.warn('telegram.preview_delete_failed', { error: String(error) });
       try {
-        await this.bot.editMessage(active.chatId, active.previewMessageId, 'Completed. See the reply below.');
+        await this.bot.editMessage(active.chatId, active.previewMessageId, t(locale, 'completed_see_reply_below'), []);
       } catch (fallbackError) {
         this.logger.warn('telegram.preview_cleanup_failed', { error: String(fallbackError) });
       }
@@ -485,24 +607,15 @@ export class BridgeController {
       return binding;
     }
     try {
-      const thread = await this.app.resumeThread(binding.threadId);
-      const normalized: ThreadBinding = {
-        chatId,
-        threadId: String(thread.id),
-        cwd: String(thread.cwd || binding.cwd || this.config.defaultCwd),
-        updatedAt: Date.now(),
-      };
-      this.store.setBinding(chatId, normalized.threadId, normalized.cwd);
-      this.attachedThreads.add(normalized.threadId);
-      this.updateStatus();
-      return normalized;
+      const session = await this.app.resumeThread({ threadId: binding.threadId });
+      return this.storeThreadSession(chatId, session, 'seed');
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
         throw error;
       }
       this.logger.warn('codex.thread_binding_stale', { chatId, threadId: binding.threadId });
       const replacement = await this.createBinding(chatId, binding.cwd ?? this.config.defaultCwd);
-      await this.bot.sendMessage(chatId, `Previous thread was unavailable. Started a new thread ${replacement.threadId}.`);
+      await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'previous_thread_unavailable_started', { threadId: replacement.threadId }));
       return {
         chatId,
         threadId: replacement.threadId,
@@ -518,7 +631,7 @@ export class BridgeController {
     this.updateStatus();
     if (!chatId) return;
     try {
-      await this.bot.sendMessage(chatId, `Bridge error: ${formatUserError(error)}`);
+      await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'bridge_error', { error: formatUserError(error) }));
     } catch (notifyError) {
       this.logger.error('telegram.error_notification_failed', { error: toErrorMeta(notifyError), chatId });
     }
@@ -548,10 +661,11 @@ export class BridgeController {
     try {
       await this.app.respond(approval.serverRequestId, { decision: 'decline' });
       this.store.markApprovalResolved(localId);
+      const locale = this.localeForChat(approval.chatId);
       if (approval.messageId !== null) {
-        await this.bot.editMessage(approval.chatId, approval.messageId, renderApprovalMessage(approval, 'deny'));
+        await this.bot.editMessage(approval.chatId, approval.messageId, renderApprovalMessage(locale, approval, 'deny'));
       } else {
-        await this.bot.sendMessage(approval.chatId, `Approval timed out and was denied.\nThread: ${approval.threadId}`);
+        await this.bot.sendMessage(approval.chatId, t(locale, 'approval_timed_out_denied', { threadId: approval.threadId }));
       }
     } catch (error) {
       this.lastError = String(error);
@@ -571,32 +685,438 @@ export class BridgeController {
       return formatUserError(error);
     }
   }
+
+  private async bindCachedThread(chatId: string, threadId: string): Promise<ThreadBinding> {
+    const session = await this.app.resumeThread({ threadId });
+    return this.storeThreadSession(chatId, session, 'replace');
+  }
+
+  private storeThreadSession(chatId: string, session: ThreadSessionState, syncMode: 'replace' | 'seed'): ThreadBinding {
+    const existing = this.store.getChatSettings(chatId);
+    const hasExisting = existing !== null;
+    const model = syncMode === 'seed'
+      ? hasExisting ? existing.model : session.model
+      : session.model;
+    const effort = syncMode === 'seed'
+      ? hasExisting ? existing.reasoningEffort : session.reasoningEffort
+      : session.reasoningEffort;
+    const normalized: ThreadBinding = {
+      chatId,
+      threadId: session.thread.threadId,
+      cwd: session.cwd,
+      updatedAt: Date.now(),
+    };
+    this.store.setBinding(chatId, normalized.threadId, normalized.cwd);
+    this.store.setChatSettings(chatId, model, effort);
+    this.attachedThreads.add(normalized.threadId);
+    this.updateStatus();
+    return normalized;
+  }
+
+  private localeForChat(chatId: string, languageCode?: string | null): AppLocale {
+    if (languageCode) {
+      const locale = normalizeLocale(languageCode);
+      const current = this.store.getChatSettings(chatId);
+      if (current?.locale !== locale) {
+        this.store.setChatLocale(chatId, locale);
+      }
+      return locale;
+    }
+    return this.store.getChatSettings(chatId)?.locale ?? 'en';
+  }
+
+  private findActiveTurn(chatId: string): ActiveTurn | undefined {
+    return [...this.activeTurns.values()].find(turn => turn.chatId === chatId);
+  }
+
+  private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (args.length === 0) {
+      await this.showModelSettingsPanel(event.chatId, undefined, locale);
+      return;
+    }
+
+    if (this.findActiveTurn(event.chatId)) {
+      await this.bot.sendMessage(event.chatId, t(locale, 'model_change_blocked'));
+      return;
+    }
+    const settings = this.store.getChatSettings(event.chatId);
+    const raw = args.join(' ').trim();
+    const models = await this.app.listModels();
+    if (raw === '' || raw.toLowerCase() === 'default' || raw.toLowerCase() === 'reset') {
+      const defaultModel = resolveCurrentModel(models, null);
+      const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
+      this.store.setChatSettings(event.chatId, null, nextEffort.effort);
+      const lines = [
+        t(locale, 'model_reset'),
+        t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
+        t(locale, 'applies_next_turn'),
+        t(locale, 'tip_use_models'),
+      ];
+      if (nextEffort.adjustedFrom) {
+        lines.splice(1, 0, t(locale, 'effort_adjusted_default_model', { effort: nextEffort.adjustedFrom }));
+      }
+      await this.bot.sendMessage(event.chatId, lines.join('\n'));
+      return;
+    }
+
+    const selected = resolveRequestedModel(models, raw);
+    if (!selected) {
+      await this.bot.sendMessage(event.chatId, t(locale, 'unknown_model', { model: raw }));
+      return;
+    }
+
+    const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
+    this.store.setChatSettings(event.chatId, selected.model, nextEffort.effort);
+    const lines = [
+      t(locale, 'model_configured', { model: selected.model }),
+      t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
+      t(locale, 'applies_next_turn'),
+      t(locale, 'tip_use_models'),
+    ];
+    if (nextEffort.adjustedFrom) {
+      lines.splice(1, 0, t(locale, 'effort_adjusted_model', { effort: nextEffort.adjustedFrom, model: selected.model }));
+    }
+    await this.bot.sendMessage(event.chatId, lines.join('\n'));
+  }
+
+  private async handleEffortCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (args.length === 0) {
+      await this.showModelSettingsPanel(event.chatId, undefined, locale);
+      return;
+    }
+
+    if (this.findActiveTurn(event.chatId)) {
+      await this.bot.sendMessage(event.chatId, t(locale, 'effort_change_blocked'));
+      return;
+    }
+    const settings = this.store.getChatSettings(event.chatId);
+    const models = await this.app.listModels();
+    const currentModel = resolveCurrentModel(models, settings?.model ?? null);
+    const raw = args.join(' ').trim().toLowerCase();
+    if (raw === 'default' || raw === 'reset') {
+      this.store.setChatSettings(event.chatId, settings?.model ?? null, null);
+      await this.bot.sendMessage(event.chatId, [
+        t(locale, 'effort_reset'),
+        t(locale, 'applies_next_turn'),
+        t(locale, 'tip_use_models'),
+      ].join('\n'));
+      return;
+    }
+
+    const effort = normalizeRequestedEffort(raw);
+    if (!effort) {
+      await this.bot.sendMessage(event.chatId, t(locale, 'usage_effort'));
+      return;
+    }
+    if (currentModel && currentModel.supportedReasoningEfforts.length > 0 && !currentModel.supportedReasoningEfforts.includes(effort)) {
+      await this.bot.sendMessage(
+        event.chatId,
+        t(locale, 'model_does_not_support_effort', {
+          model: currentModel.model,
+          effort,
+          supported: currentModel.supportedReasoningEfforts.join(', '),
+        }),
+      );
+      return;
+    }
+    this.store.setChatSettings(event.chatId, settings?.model ?? null, effort);
+    await this.bot.sendMessage(event.chatId, [
+      t(locale, 'effort_configured', { effort }),
+      t(locale, 'applies_next_turn'),
+      t(locale, 'tip_use_models'),
+    ].join('\n'));
+  }
+
+  private async handleThreadOpenCallback(event: TelegramCallbackEvent, threadId: string, locale: AppLocale): Promise<void> {
+    let binding: ThreadBinding;
+    try {
+      binding = await this.bindCachedThread(event.chatId, threadId);
+    } catch (error) {
+      if (isThreadNotFoundError(error)) {
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'thread_no_longer_available'));
+        return;
+      }
+      throw error;
+    }
+
+    const threads = this.store.listCachedThreads(event.chatId);
+    if (threads.length > 0) {
+      await this.bot.editHtmlMessage(
+        event.chatId,
+        event.messageId,
+        formatThreadsMessage(locale, threads, binding.threadId),
+        buildThreadsKeyboard(locale, threads),
+      );
+    }
+
+    let callbackText = t(locale, 'thread_opened');
+    if (this.config.codexAppSyncOnOpen) {
+      const revealError = await this.tryRevealThread(event.chatId, binding.threadId, 'open');
+      callbackText = revealError ? t(locale, 'opened_sync_failed_short') : t(locale, 'opened_in_codex_short');
+    }
+    await this.bot.answerCallback(event.callbackQueryId, callbackText);
+  }
+
+  private async handleTurnInterruptCallback(event: TelegramCallbackEvent, turnId: string, locale: AppLocale): Promise<void> {
+    const active = this.activeTurns.get(turnId);
+    if (!active || active.chatId !== event.chatId) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'turn_already_finished'));
+      return;
+    }
+    if (active.interruptRequested) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'interrupt_already_requested'));
+      return;
+    }
+    active.interruptRequested = true;
+    try {
+      await this.requestInterrupt(active);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'interrupt_requested'));
+    } catch (error) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'interrupt_failed', { error: formatUserError(error) }));
+    }
+  }
+
+  private async handleNavigationCallback(
+    event: TelegramCallbackEvent,
+    target: 'models' | 'threads' | 'reveal',
+    locale: AppLocale,
+  ): Promise<void> {
+    if (target === 'models') {
+      await this.showModelSettingsPanel(event.chatId, event.messageId, locale);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'opened_model_settings'));
+      return;
+    }
+    if (target === 'threads') {
+      await this.showThreadsPanel(event.chatId, event.messageId, undefined, locale);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'opened_thread_list'));
+      return;
+    }
+
+    const binding = this.store.getBinding(event.chatId);
+    if (!binding) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'no_thread_bound_callback'));
+      return;
+    }
+    const readyBinding = await this.ensureThreadReady(event.chatId, binding);
+    const revealError = await this.tryRevealThread(event.chatId, readyBinding.threadId, 'reveal');
+    await this.bot.answerCallback(event.callbackQueryId, revealError ? t(locale, 'reveal_failed', { error: revealError }) : t(locale, 'opened_in_codex_short'));
+  }
+
+  private async showWherePanel(chatId: string, messageId?: number, locale = this.localeForChat(chatId)): Promise<void> {
+    const binding = this.store.getBinding(chatId);
+    const settings = this.store.getChatSettings(chatId);
+    if (!binding) {
+      const text = [
+        t(locale, 'where_no_thread_bound'),
+        t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+        t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+        t(locale, 'where_send_message_or_new'),
+      ].join('\n');
+      if (messageId !== undefined) {
+        await this.bot.editMessage(chatId, messageId, text, whereKeyboard(locale, false));
+        return;
+      }
+      await this.bot.sendMessage(chatId, text, whereKeyboard(locale, false));
+      return;
+    }
+
+    const readyBinding = await this.ensureThreadReady(chatId, binding);
+    const thread = await this.app.readThread(readyBinding.threadId, false);
+    if (!thread) {
+      const text = t(locale, 'where_thread_unavailable', { threadId: readyBinding.threadId });
+      if (messageId !== undefined) {
+        await this.bot.editMessage(chatId, messageId, text, whereKeyboard(locale, false));
+        return;
+      }
+      await this.bot.sendMessage(chatId, text, whereKeyboard(locale, false));
+      return;
+    }
+
+    const text = formatWhereMessage(locale, thread, this.store.getChatSettings(chatId), this.config.defaultCwd);
+    if (messageId !== undefined) {
+      await this.bot.editMessage(chatId, messageId, text, whereKeyboard(locale, true));
+      return;
+    }
+    await this.bot.sendMessage(chatId, text, whereKeyboard(locale, true));
+  }
+
+  private async showThreadsPanel(chatId: string, messageId?: number, searchTerm?: string | null, locale = this.localeForChat(chatId)): Promise<void> {
+    const binding = this.store.getBinding(chatId);
+    const threads = await this.app.listThreads({
+      limit: this.config.threadListLimit,
+      searchTerm: searchTerm ?? null,
+    });
+    const cached = threads.map((thread) => ({
+      threadId: thread.threadId,
+      name: thread.name,
+      preview: thread.preview,
+      cwd: thread.cwd,
+      modelProvider: thread.modelProvider,
+      status: thread.status,
+      updatedAt: thread.updatedAt,
+    }));
+    this.store.cacheThreadList(chatId, cached);
+    const text = formatThreadsMessage(locale, cached, binding?.threadId ?? null, searchTerm ?? null);
+    const keyboard = buildThreadsKeyboard(locale, cached);
+    if (messageId !== undefined) {
+      await this.bot.editHtmlMessage(chatId, messageId, text, keyboard);
+      return;
+    }
+    await this.bot.sendHtmlMessage(chatId, text, keyboard);
+  }
+
+  private async showModelSettingsPanel(chatId: string, messageId?: number, locale = this.localeForChat(chatId)): Promise<void> {
+    const models = await this.app.listModels();
+    const settings = this.store.getChatSettings(chatId);
+    const text = formatModelSettingsMessage(locale, models, settings);
+    const keyboard = buildModelSettingsKeyboard(locale, models, settings);
+    if (messageId !== undefined) {
+      await this.bot.editHtmlMessage(chatId, messageId, text, keyboard);
+      return;
+    }
+    await this.bot.sendHtmlMessage(chatId, text, keyboard);
+  }
+
+  private async handleSettingsCallback(
+    event: TelegramCallbackEvent,
+    kind: 'model' | 'effort',
+    rawValue: string,
+    locale: AppLocale,
+  ): Promise<void> {
+    if (this.findActiveTurn(event.chatId)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
+      return;
+    }
+
+    const models = await this.app.listModels();
+    const settings = this.store.getChatSettings(event.chatId);
+    const value = kind === 'model' ? decodeURIComponent(rawValue) : rawValue;
+
+    if (kind === 'model') {
+      if (value === 'default') {
+        const defaultModel = resolveCurrentModel(models, null);
+        const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
+        this.store.setChatSettings(event.chatId, null, nextEffort.effort);
+        await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'using_server_default_model'));
+        return;
+      }
+      const selected = resolveRequestedModel(models, value);
+      if (!selected) {
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'model_no_longer_available'));
+        return;
+      }
+      const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
+      this.store.setChatSettings(event.chatId, selected.model, nextEffort.effort);
+      await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'callback_model', { model: selected.model }));
+      return;
+    }
+
+    if (value === 'default') {
+      this.store.setChatSettings(event.chatId, settings?.model ?? null, null);
+      await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'using_default_effort'));
+      return;
+    }
+
+    const effort = normalizeRequestedEffort(value);
+    if (!effort) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'unknown_effort'));
+      return;
+    }
+    const currentModel = resolveCurrentModel(models, settings?.model ?? null);
+    if (currentModel && currentModel.supportedReasoningEfforts.length > 0 && !currentModel.supportedReasoningEfforts.includes(effort)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'effort_not_supported_by_model'));
+      return;
+    }
+    this.store.setChatSettings(event.chatId, settings?.model ?? null, effort);
+    await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+    await this.bot.answerCallback(event.callbackQueryId, t(locale, 'callback_effort', { effort }));
+  }
+
+  private async refreshModelSettingsPanel(chatId: string, messageId: number, locale: AppLocale, models?: ModelInfo[]): Promise<void> {
+    const resolvedModels = models ?? await this.app.listModels();
+    const settings = this.store.getChatSettings(chatId);
+    await this.bot.editHtmlMessage(
+      chatId,
+      messageId,
+      formatModelSettingsMessage(locale, resolvedModels, settings),
+      buildModelSettingsKeyboard(locale, resolvedModels, settings),
+    );
+  }
+
+  private async requestInterrupt(active: ActiveTurn): Promise<void> {
+    active.interruptRequested = true;
+    try {
+      await this.app.interruptTurn(active.threadId, active.turnId);
+      await this.bot.editMessage(
+        active.chatId,
+        active.previewMessageId,
+        this.renderActivePreview(active),
+        [],
+      );
+    } catch (error) {
+      active.interruptRequested = false;
+      throw error;
+    }
+  }
+
+  private renderActivePreview(active: ActiveTurn): string {
+    const locale = this.localeForChat(active.chatId);
+    const content = active.buffer || active.finalText || t(locale, 'working');
+    if (!active.interruptRequested) {
+      return sanitizeTelegramPreview(content);
+    }
+    return sanitizeTelegramPreview(`${t(locale, 'interrupt_requested_preview')}\n\n${content}`);
+  }
 }
 
-function formatUnix(value: unknown): string {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) return 'unknown';
-  return new Date(numeric * 1000).toISOString();
-}
-
-function approvalKeyboard(localId: string): Array<Array<{ text: string; callback_data: string }>> {
+function approvalKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
   return [[
-    { text: 'Allow', callback_data: `approval:${localId}:accept` },
-    { text: 'Allow Session', callback_data: `approval:${localId}:session` },
-    { text: 'Deny', callback_data: `approval:${localId}:deny` },
+    { text: t(locale, 'button_allow'), callback_data: `approval:${localId}:accept` },
+    { text: t(locale, 'button_allow_session'), callback_data: `approval:${localId}:session` },
+    { text: t(locale, 'button_deny'), callback_data: `approval:${localId}:deny` },
   ]];
 }
 
-function renderApprovalMessage(record: PendingApprovalRecord, decision?: ApprovalAction): string {
-  const lines = [
-    `Approval requested: ${record.kind}`,
-    `Thread: ${record.threadId}`,
-    `Turn: ${record.turnId}`,
+function activeTurnKeyboard(locale: AppLocale, turnId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: t(locale, 'button_interrupt'), callback_data: `turn:interrupt:${turnId}` },
+  ]];
+}
+
+function whereKeyboard(locale: AppLocale, hasBinding: boolean): Array<Array<{ text: string; callback_data: string }>> {
+  const firstRow = [{ text: t(locale, 'button_models'), callback_data: 'nav:models' }];
+  const secondRow = [{ text: t(locale, 'button_threads'), callback_data: 'nav:threads' }];
+  if (!hasBinding) {
+    return [firstRow, secondRow];
+  }
+  return [
+    [{ text: t(locale, 'button_reveal'), callback_data: 'nav:reveal' }, ...firstRow],
+    secondRow,
   ];
-  if (record.command) lines.push(`Command: ${record.command}`);
-  if (record.cwd) lines.push(`CWD: ${record.cwd}`);
-  if (record.reason) lines.push(`Reason: ${record.reason}`);
-  if (decision) lines.push(`Decision: ${decision}`);
+}
+
+function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord, decision?: ApprovalAction): string {
+  const lines = [
+    t(locale, 'approval_requested', {
+      kind: record.kind === 'fileChange' ? t(locale, 'approval_kind_fileChange') : t(locale, 'approval_kind_command'),
+    }),
+    t(locale, 'line_thread', { value: record.threadId }),
+    t(locale, 'line_turn', { value: record.turnId }),
+  ];
+  if (record.command) lines.push(t(locale, 'line_command', { value: record.command }));
+  if (record.cwd) lines.push(t(locale, 'line_cwd', { value: record.cwd }));
+  if (record.reason) lines.push(t(locale, 'line_reason', { value: record.reason }));
+  if (decision) {
+    const decisionKey = decision === 'accept'
+      ? 'approval_decision_accept'
+      : decision === 'session'
+        ? 'approval_decision_session'
+        : 'approval_decision_deny';
+    lines.push(t(locale, 'line_decision', { value: t(locale, decisionKey) }));
+  }
   return lines.join('\n');
 }
 

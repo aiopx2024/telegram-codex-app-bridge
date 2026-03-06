@@ -5,12 +5,55 @@ export interface ThreadBinding {
   updatedAt: number;
 }
 
+export type AppLocale = 'en' | 'zh';
+export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ThreadStatusKind = 'active' | 'idle' | 'notLoaded' | 'systemError';
+
+export interface ChatSessionSettings {
+  chatId: string;
+  model: string | null;
+  reasoningEffort: ReasoningEffortValue | null;
+  locale: AppLocale | null;
+  updatedAt: number;
+}
+
 export interface CachedThread {
   index: number;
   threadId: string;
+  name: string | null;
   preview: string;
   cwd: string | null;
+  modelProvider: string | null;
+  status: ThreadStatusKind;
   updatedAt: number;
+}
+
+export interface AppThread {
+  threadId: string;
+  name: string | null;
+  preview: string;
+  cwd: string | null;
+  modelProvider: string | null;
+  status: ThreadStatusKind;
+  updatedAt: number;
+}
+
+export interface ThreadSessionState {
+  thread: AppThread;
+  model: string;
+  modelProvider: string;
+  reasoningEffort: ReasoningEffortValue | null;
+  cwd: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  isDefault: boolean;
+  supportedReasoningEfforts: ReasoningEffortValue[];
+  defaultReasoningEffort: ReasoningEffortValue;
 }
 
 export type ApprovalKind = 'command' | 'fileChange';

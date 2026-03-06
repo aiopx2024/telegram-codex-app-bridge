@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import type { CachedThread, PendingApprovalRecord, ThreadBinding } from '../types.js';
+import type { AppLocale, CachedThread, ChatSessionSettings, PendingApprovalRecord, ReasoningEffortValue, ThreadBinding } from '../types.js';
 
 export class BridgeStore {
   private db: DatabaseSync;
@@ -20,12 +20,22 @@ export class BridgeStore {
         cwd TEXT,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS chat_settings (
+        chat_id TEXT PRIMARY KEY,
+        model TEXT,
+        reasoning_effort TEXT,
+        locale TEXT,
+        updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS thread_cache (
         chat_id TEXT NOT NULL,
         idx INTEGER NOT NULL,
         thread_id TEXT NOT NULL,
+        name TEXT,
         preview TEXT NOT NULL,
         cwd TEXT,
+        model_provider TEXT,
+        status TEXT NOT NULL DEFAULT 'idle',
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (chat_id, idx)
       );
@@ -54,6 +64,10 @@ export class BridgeStore {
         created_at INTEGER NOT NULL
       );
     `);
+    this.ensureColumn('thread_cache', 'name', 'TEXT');
+    this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
+    this.ensureColumn('thread_cache', 'status', "TEXT NOT NULL DEFAULT 'idle'");
+    this.ensureColumn('chat_settings', 'locale', 'TEXT');
   }
 
   getTelegramOffset(botKey: string): number {
@@ -88,6 +102,33 @@ export class BridgeStore {
     `).run(chatId, threadId, cwd, Date.now());
   }
 
+  getChatSettings(chatId: string): ChatSessionSettings | null {
+    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      chatId: String(row.chat_id),
+      model: row.model === null ? null : String(row.model),
+      reasoningEffort: row.reasoning_effort === null ? null : String(row.reasoning_effort) as ReasoningEffortValue,
+      locale: row.locale === null ? null : String(row.locale) as AppLocale,
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
+  setChatSettings(chatId: string, model: string | null, reasoningEffort: ReasoningEffortValue | null, locale?: AppLocale | null): void {
+    const current = this.getChatSettings(chatId);
+    const nextLocale = locale === undefined ? current?.locale ?? null : locale;
+    this.db.prepare(`
+      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET model = excluded.model, reasoning_effort = excluded.reasoning_effort, locale = excluded.locale, updated_at = excluded.updated_at
+    `).run(chatId, model, reasoningEffort, nextLocale, Date.now());
+  }
+
+  setChatLocale(chatId: string, locale: AppLocale): void {
+    const current = this.getChatSettings(chatId);
+    this.setChatSettings(chatId, current?.model ?? null, current?.reasoningEffort ?? null, locale);
+  }
+
   findChatIdByThreadId(threadId: string): string | null {
     const row = this.db.prepare('SELECT chat_id FROM chat_bindings WHERE thread_id = ?').get(threadId) as { chat_id: string } | undefined;
     return row ? String(row.chat_id) : null;
@@ -101,25 +142,61 @@ export class BridgeStore {
   cacheThreadList(chatId: string, threads: Array<Omit<CachedThread, 'index'>>): void {
     const deleteStmt = this.db.prepare('DELETE FROM thread_cache WHERE chat_id = ?');
     const insertStmt = this.db.prepare(`
-      INSERT INTO thread_cache (chat_id, idx, thread_id, preview, cwd, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO thread_cache (chat_id, idx, thread_id, name, preview, cwd, model_provider, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     deleteStmt.run(chatId);
     threads.forEach((thread, index) => {
-      insertStmt.run(chatId, index + 1, thread.threadId, thread.preview, thread.cwd, thread.updatedAt);
+      insertStmt.run(
+        chatId,
+        index + 1,
+        thread.threadId,
+        thread.name,
+        thread.preview,
+        thread.cwd,
+        thread.modelProvider,
+        thread.status,
+        thread.updatedAt,
+      );
     });
   }
 
   getCachedThread(chatId: string, index: number): CachedThread | null {
-    const row = this.db.prepare('SELECT idx, thread_id, preview, cwd, updated_at FROM thread_cache WHERE chat_id = ? AND idx = ?').get(chatId, index) as Record<string, unknown> | undefined;
+    const row = this.db.prepare(`
+      SELECT idx, thread_id, name, preview, cwd, model_provider, status, updated_at
+      FROM thread_cache
+      WHERE chat_id = ? AND idx = ?
+    `).get(chatId, index) as Record<string, unknown> | undefined;
     if (!row) return null;
     return {
       index: Number(row.idx),
       threadId: String(row.thread_id),
+      name: row.name === null ? null : String(row.name),
       preview: String(row.preview),
       cwd: row.cwd === null ? null : String(row.cwd),
-      updatedAt: Number(row.updated_at)
+      modelProvider: row.model_provider === null ? null : String(row.model_provider),
+      status: String(row.status) as CachedThread['status'],
+      updatedAt: Number(row.updated_at),
     };
+  }
+
+  listCachedThreads(chatId: string): CachedThread[] {
+    const rows = this.db.prepare(`
+      SELECT idx, thread_id, name, preview, cwd, model_provider, status, updated_at
+      FROM thread_cache
+      WHERE chat_id = ?
+      ORDER BY idx ASC
+    `).all(chatId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      index: Number(row.idx),
+      threadId: String(row.thread_id),
+      name: row.name === null ? null : String(row.name),
+      preview: String(row.preview),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      modelProvider: row.model_provider === null ? null : String(row.model_provider),
+      status: String(row.status) as CachedThread['status'],
+      updatedAt: Number(row.updated_at),
+    }));
   }
 
   savePendingApproval(record: PendingApprovalRecord): void {
@@ -189,5 +266,13 @@ export class BridgeStore {
       createdAt: Number(row.created_at),
       resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at)
     };
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some(entry => entry.name === column)) {
+      return;
+    }
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }

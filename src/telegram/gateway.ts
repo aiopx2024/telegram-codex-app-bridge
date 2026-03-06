@@ -3,11 +3,13 @@ import crypto from 'node:crypto';
 import { callTelegramApi } from './api.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
+import { getTelegramCommands } from '../i18n.js';
 
 interface TelegramUser {
   id: number;
   username?: string;
   first_name?: string;
+  language_code?: string;
 }
 
 interface TelegramChat {
@@ -51,6 +53,7 @@ export interface TelegramTextEvent {
   userId: string;
   text: string;
   messageId: number;
+  languageCode?: string;
 }
 
 export interface TelegramCallbackEvent {
@@ -59,6 +62,7 @@ export interface TelegramCallbackEvent {
   data: string;
   callbackQueryId: string;
   messageId: number;
+  languageCode?: string;
 }
 
 export class TelegramGateway extends EventEmitter {
@@ -94,10 +98,32 @@ export class TelegramGateway extends EventEmitter {
   }
 
   async sendMessage(chatId: string, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<number> {
+    return this.sendMessageWithOptions(chatId, text, inlineKeyboard);
+  }
+
+  async sendHtmlMessage(chatId: string, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<number> {
+    return this.sendMessageWithOptions(chatId, text, inlineKeyboard, 'HTML');
+  }
+
+  async editMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
+    return this.editMessageWithOptions(chatId, messageId, text, inlineKeyboard);
+  }
+
+  async editHtmlMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
+    return this.editMessageWithOptions(chatId, messageId, text, inlineKeyboard, 'HTML');
+  }
+
+  private async sendMessageWithOptions(
+    chatId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+    parseMode?: 'HTML',
+  ): Promise<number> {
     const result = await callTelegramApi<SendMessageResult>(this.botToken, 'sendMessage', {
       chat_id: chatId,
       text,
       ...(inlineKeyboard ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {}),
+      ...(parseMode ? { parse_mode: parseMode } : {}),
       disable_web_page_preview: true,
     });
     if (!result.ok || !result.result) {
@@ -106,12 +132,19 @@ export class TelegramGateway extends EventEmitter {
     return result.result.message_id;
   }
 
-  async editMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
+  private async editMessageWithOptions(
+    chatId: string,
+    messageId: number,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+    parseMode?: 'HTML',
+  ): Promise<void> {
     const result = await callTelegramApi(this.botToken, 'editMessageText', {
       chat_id: chatId,
       message_id: messageId,
       text,
       ...(inlineKeyboard ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {}),
+      ...(parseMode ? { parse_mode: parseMode } : {}),
       disable_web_page_preview: true,
     });
     if (!result.ok && !String(result.description || '').includes('message is not modified')) {
@@ -153,16 +186,11 @@ export class TelegramGateway extends EventEmitter {
 
   private async registerCommands(): Promise<void> {
     await callTelegramApi(this.botToken, 'setMyCommands', {
-      commands: [
-        { command: 'help', description: 'Show commands' },
-        { command: 'status', description: 'Show bridge status' },
-        { command: 'threads', description: 'List recent threads' },
-        { command: 'open', description: 'Open cached thread by number' },
-        { command: 'new', description: 'Start a new thread' },
-        { command: 'reveal', description: 'Open the current thread in Codex.app' },
-        { command: 'where', description: 'Show current binding' },
-        { command: 'interrupt', description: 'Interrupt the active turn' },
-      ],
+      commands: getTelegramCommands('en'),
+    });
+    await callTelegramApi(this.botToken, 'setMyCommands', {
+      commands: getTelegramCommands('zh'),
+      language_code: 'zh',
     });
   }
 
@@ -199,6 +227,7 @@ export class TelegramGateway extends EventEmitter {
         userId: String(update.message.from.id),
         text: update.message.text,
         messageId: update.message.message_id,
+        ...(update.message.from.language_code ? { languageCode: update.message.from.language_code } : {}),
       } satisfies TelegramTextEvent);
       return;
     }
@@ -211,6 +240,7 @@ export class TelegramGateway extends EventEmitter {
         data: update.callback_query.data,
         callbackQueryId: update.callback_query.id,
         messageId: update.callback_query.message.message_id,
+        ...(update.callback_query.from.language_code ? { languageCode: update.callback_query.from.language_code } : {}),
       } satisfies TelegramCallbackEvent);
     }
   }

@@ -37,16 +37,36 @@ test('BridgeStore persists and resolves thread bindings', () => {
 test('BridgeStore caches thread lists and pending approvals', () => {
   withStore((store) => {
     store.cacheThreadList('chat-2', [
-      { threadId: 'thread-a', preview: 'Fix auth bug', cwd: '/repo/a', updatedAt: 100 },
-      { threadId: 'thread-b', preview: 'Review docs', cwd: null, updatedAt: 200 },
+      {
+        threadId: 'thread-a',
+        name: 'Fix auth bug',
+        preview: 'Fix auth bug',
+        cwd: '/repo/a',
+        modelProvider: 'openai',
+        status: 'idle',
+        updatedAt: 100,
+      },
+      {
+        threadId: 'thread-b',
+        name: null,
+        preview: 'Review docs',
+        cwd: null,
+        modelProvider: null,
+        status: 'active',
+        updatedAt: 200,
+      },
     ]);
     assert.deepEqual(store.getCachedThread('chat-2', 2), {
       index: 2,
       threadId: 'thread-b',
+      name: null,
       preview: 'Review docs',
       cwd: null,
+      modelProvider: null,
+      status: 'active',
       updatedAt: 200,
     });
+    assert.equal(store.listCachedThreads('chat-2').length, 2);
 
     store.savePendingApproval({
       localId: 'approval-1',
@@ -71,5 +91,36 @@ test('BridgeStore caches thread lists and pending approvals', () => {
     store.markApprovalResolved('approval-1');
     assert.ok(store.getPendingApproval('approval-1')?.resolvedAt !== null);
     assert.equal(store.countPendingApprovals(), 0);
+  });
+});
+
+test('BridgeStore persists chat session settings', () => {
+  withStore((store) => {
+    store.setChatSettings('chat-3', 'o3', 'high');
+    assert.deepEqual(store.getChatSettings('chat-3'), {
+      chatId: 'chat-3',
+      model: 'o3',
+      reasoningEffort: 'high',
+      locale: null,
+      updatedAt: store.getChatSettings('chat-3')!.updatedAt,
+    });
+
+    store.setChatSettings('chat-3', null, 'medium');
+    assert.deepEqual(store.getChatSettings('chat-3'), {
+      chatId: 'chat-3',
+      model: null,
+      reasoningEffort: 'medium',
+      locale: null,
+      updatedAt: store.getChatSettings('chat-3')!.updatedAt,
+    });
+
+    store.setChatLocale('chat-3', 'zh');
+    assert.deepEqual(store.getChatSettings('chat-3'), {
+      chatId: 'chat-3',
+      model: null,
+      reasoningEffort: 'medium',
+      locale: 'zh',
+      updatedAt: store.getChatSettings('chat-3')!.updatedAt,
+    });
   });
 });

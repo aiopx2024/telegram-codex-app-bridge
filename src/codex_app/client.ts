@@ -3,6 +3,7 @@ import net from 'node:net';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { Logger } from '../logger.js';
+import type { AppThread, ModelInfo, ReasoningEffortValue, ThreadSessionState, ThreadStatusKind } from '../types.js';
 import { buildThreadDeepLink, openUrl } from './deeplink.js';
 
 interface JsonRpcResponse {
@@ -20,6 +21,30 @@ export interface JsonRpcServerRequest {
   id: string | number;
   method: string;
   params?: any;
+}
+
+interface ListThreadsOptions {
+  limit: number;
+  searchTerm?: string | null;
+}
+
+interface StartThreadOptions {
+  cwd: string | null;
+  approvalPolicy: string;
+  model: string | null;
+}
+
+interface ResumeThreadOptions {
+  threadId: string;
+}
+
+interface StartTurnOptions {
+  threadId: string;
+  text: string;
+  approvalPolicy: string;
+  cwd: string | null;
+  model: string | null;
+  effort: ReasoningEffortValue | null;
 }
 
 export class CodexAppClient extends EventEmitter {
@@ -70,21 +95,28 @@ export class CodexAppClient extends EventEmitter {
     this.connected = false;
   }
 
-  async listThreads(limit: number): Promise<any[]> {
-    const result = await this.request('thread/list', { limit, archived: false });
-    return Array.isArray((result as any).data) ? (result as any).data : [];
+  async listThreads(options: ListThreadsOptions): Promise<AppThread[]> {
+    const result = await this.request('thread/list', {
+      limit: options.limit,
+      sortKey: 'updated_at',
+      searchTerm: options.searchTerm ?? null,
+      archived: false,
+    });
+    const rows = Array.isArray((result as any).data) ? (result as any).data : [];
+    return rows.map(mapThread);
   }
 
-  async readThread(threadId: string, includeTurns = false): Promise<any> {
+  async readThread(threadId: string, includeTurns = false): Promise<AppThread | null> {
     const result = await this.request('thread/read', { threadId, includeTurns });
-    return (result as any).thread;
+    const thread = (result as any).thread;
+    return thread ? mapThread(thread) : null;
   }
 
-  async startThread(cwd: string | null, approvalPolicy: string): Promise<any> {
+  async startThread(options: StartThreadOptions): Promise<ThreadSessionState> {
     const result = await this.request('thread/start', {
-      cwd,
-      approvalPolicy,
-      model: null,
+      cwd: options.cwd,
+      approvalPolicy: options.approvalPolicy,
+      model: options.model,
       modelProvider: null,
       sandbox: null,
       config: null,
@@ -93,17 +125,15 @@ export class CodexAppClient extends EventEmitter {
       developerInstructions: null,
       personality: null,
       ephemeral: null,
-      dynamicTools: null,
-      mockExperimentalField: null,
       experimentalRawEvents: false,
       persistExtendedHistory: false,
     });
-    return (result as any).thread;
+    return mapThreadSessionState(result);
   }
 
-  async resumeThread(threadId: string): Promise<any> {
+  async resumeThread(options: ResumeThreadOptions): Promise<ThreadSessionState> {
     const result = await this.request('thread/resume', {
-      threadId,
+      threadId: options.threadId,
       cwd: null,
       approvalPolicy: null,
       baseInstructions: null,
@@ -113,25 +143,38 @@ export class CodexAppClient extends EventEmitter {
       model: null,
       modelProvider: null,
       personality: null,
+      persistExtendedHistory: false,
     });
-    return (result as any).thread;
+    return mapThreadSessionState(result);
   }
 
-  async startTurn(threadId: string, text: string, approvalPolicy: string, cwd: string | null): Promise<{ id: string; status: string }> {
+  async startTurn(options: StartTurnOptions): Promise<{ id: string; status: string }> {
     const result = await this.request('turn/start', {
-      threadId,
-      input: [{ type: 'text', text, text_elements: [] }],
-      cwd,
-      approvalPolicy,
+      threadId: options.threadId,
+      input: [{ type: 'text', text: options.text, text_elements: [] }],
+      cwd: options.cwd,
+      approvalPolicy: options.approvalPolicy,
       sandboxPolicy: null,
-      model: null,
-      effort: null,
+      model: options.model,
+      effort: options.effort,
       summary: null,
       personality: null,
       outputSchema: null,
       collaborationMode: null,
     });
     return (result as any).turn;
+  }
+
+  async listModels(): Promise<ModelInfo[]> {
+    const models: ModelInfo[] = [];
+    let cursor: string | null = null;
+    do {
+      const result = await this.request('model/list', { cursor, limit: 100, includeHidden: false });
+      const rows = Array.isArray((result as any).data) ? (result as any).data : [];
+      models.push(...rows.map(mapModel));
+      cursor = typeof (result as any).nextCursor === 'string' ? (result as any).nextCursor : null;
+    } while (cursor);
+    return models;
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
@@ -332,4 +375,51 @@ async function reservePort(): Promise<number> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function mapThread(raw: any): AppThread {
+  return {
+    threadId: String(raw.id),
+    name: raw.name ? String(raw.name) : null,
+    preview: String(raw.preview || '(empty)'),
+    cwd: raw.cwd ? String(raw.cwd) : null,
+    modelProvider: raw.modelProvider ? String(raw.modelProvider) : null,
+    status: mapThreadStatus(raw.status),
+    updatedAt: Number(raw.updatedAt || 0),
+  };
+}
+
+function mapThreadStatus(raw: any): ThreadStatusKind {
+  const type = raw?.type;
+  if (type === 'active' || type === 'idle' || type === 'notLoaded' || type === 'systemError') {
+    return type;
+  }
+  return 'idle';
+}
+
+function mapThreadSessionState(raw: any): ThreadSessionState {
+  return {
+    thread: mapThread(raw.thread),
+    model: String(raw.model),
+    modelProvider: String(raw.modelProvider),
+    reasoningEffort: raw.reasoningEffort === null ? null : String(raw.reasoningEffort) as ReasoningEffortValue,
+    cwd: String(raw.cwd),
+  };
+}
+
+function mapModel(raw: any): ModelInfo {
+  const efforts = Array.isArray(raw.supportedReasoningEfforts)
+    ? raw.supportedReasoningEfforts
+        .map((entry: any) => entry?.reasoningEffort)
+        .filter((value: unknown): value is ReasoningEffortValue => typeof value === 'string')
+    : [];
+  return {
+    id: String(raw.id),
+    model: String(raw.model),
+    displayName: String(raw.displayName || raw.model),
+    description: String(raw.description || ''),
+    isDefault: Boolean(raw.isDefault),
+    supportedReasoningEfforts: efforts,
+    defaultReasoningEffort: String(raw.defaultReasoningEffort) as ReasoningEffortValue,
+  };
 }

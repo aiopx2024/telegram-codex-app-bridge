@@ -7,6 +7,7 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Telegram private-chat control for a single allowed user
 - Local `codex app-server` transport over loopback WebSocket
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
+- Chat-scoped model and reasoning-effort control with `/models` and optional `/model`/`/effort` aliases
 - Deep-link sync from Telegram into `Codex.app` with `/open` and `/reveal`
 - Inline approval buttons for command and file-change approvals
 - SQLite persistence for bindings, offsets, approvals, and audit logs
@@ -43,9 +44,11 @@ The bridge accepts messages only from the configured Telegram user id.
 
 - `/help`
 - `/status`
-- `/threads`
+- `/threads [query]`
 - `/open <n>`
 - `/new [cwd]`
+- `/models` opens the model and reasoning picker
+- `/model` and `/effort` are compatibility aliases for the same picker
 - `/reveal`
 - `/where`
 - `/interrupt`
