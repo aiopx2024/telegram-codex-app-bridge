@@ -1,0 +1,193 @@
+import path from 'node:path';
+import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import type { CachedThread, PendingApprovalRecord, ThreadBinding } from '../types.js';
+
+export class BridgeStore {
+  private db: DatabaseSync;
+
+  constructor(dbPath: string) {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS telegram_offsets (
+        bot_key TEXT PRIMARY KEY,
+        update_id INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chat_bindings (
+        chat_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        cwd TEXT,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS thread_cache (
+        chat_id TEXT NOT NULL,
+        idx INTEGER NOT NULL,
+        thread_id TEXT NOT NULL,
+        preview TEXT NOT NULL,
+        cwd TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, idx)
+      );
+      CREATE TABLE IF NOT EXISTS pending_approvals (
+        local_id TEXT PRIMARY KEY,
+        server_request_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        approval_id TEXT,
+        reason TEXT,
+        command TEXT,
+        cwd TEXT,
+        message_id INTEGER,
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        direction TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  getTelegramOffset(botKey: string): number {
+    const row = this.db.prepare('SELECT update_id FROM telegram_offsets WHERE bot_key = ?').get(botKey) as { update_id: number } | undefined;
+    return row?.update_id ?? 0;
+  }
+
+  setTelegramOffset(botKey: string, updateId: number): void {
+    this.db.prepare(`
+      INSERT INTO telegram_offsets (bot_key, update_id)
+      VALUES (?, ?)
+      ON CONFLICT(bot_key) DO UPDATE SET update_id = excluded.update_id
+    `).run(botKey, updateId);
+  }
+
+  getBinding(chatId: string): ThreadBinding | null {
+    const row = this.db.prepare('SELECT chat_id, thread_id, cwd, updated_at FROM chat_bindings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      chatId: String(row.chat_id),
+      threadId: String(row.thread_id),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      updatedAt: Number(row.updated_at)
+    };
+  }
+
+  setBinding(chatId: string, threadId: string, cwd: string | null): void {
+    this.db.prepare(`
+      INSERT INTO chat_bindings (chat_id, thread_id, cwd, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(chat_id) DO UPDATE SET thread_id = excluded.thread_id, cwd = excluded.cwd, updated_at = excluded.updated_at
+    `).run(chatId, threadId, cwd, Date.now());
+  }
+
+  findChatIdByThreadId(threadId: string): string | null {
+    const row = this.db.prepare('SELECT chat_id FROM chat_bindings WHERE thread_id = ?').get(threadId) as { chat_id: string } | undefined;
+    return row ? String(row.chat_id) : null;
+  }
+
+  countBindings(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM chat_bindings').get() as { count: number };
+    return Number(row.count);
+  }
+
+  cacheThreadList(chatId: string, threads: Array<Omit<CachedThread, 'index'>>): void {
+    const deleteStmt = this.db.prepare('DELETE FROM thread_cache WHERE chat_id = ?');
+    const insertStmt = this.db.prepare(`
+      INSERT INTO thread_cache (chat_id, idx, thread_id, preview, cwd, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    deleteStmt.run(chatId);
+    threads.forEach((thread, index) => {
+      insertStmt.run(chatId, index + 1, thread.threadId, thread.preview, thread.cwd, thread.updatedAt);
+    });
+  }
+
+  getCachedThread(chatId: string, index: number): CachedThread | null {
+    const row = this.db.prepare('SELECT idx, thread_id, preview, cwd, updated_at FROM thread_cache WHERE chat_id = ? AND idx = ?').get(chatId, index) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      index: Number(row.idx),
+      threadId: String(row.thread_id),
+      preview: String(row.preview),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      updatedAt: Number(row.updated_at)
+    };
+  }
+
+  savePendingApproval(record: PendingApprovalRecord): void {
+    this.db.prepare(`
+      INSERT INTO pending_approvals (
+        local_id, server_request_id, kind, chat_id, thread_id, turn_id, item_id, approval_id, reason, command, cwd, message_id, created_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      record.localId,
+      record.serverRequestId,
+      record.kind,
+      record.chatId,
+      record.threadId,
+      record.turnId,
+      record.itemId,
+      record.approvalId,
+      record.reason,
+      record.command,
+      record.cwd,
+      record.messageId,
+      record.createdAt,
+      record.resolvedAt,
+    );
+  }
+
+  updatePendingApprovalMessage(localId: string, messageId: number): void {
+    this.db.prepare('UPDATE pending_approvals SET message_id = ? WHERE local_id = ?').run(messageId, localId);
+  }
+
+  getPendingApproval(localId: string): PendingApprovalRecord | null {
+    const row = this.db.prepare('SELECT * FROM pending_approvals WHERE local_id = ?').get(localId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapApproval(row);
+  }
+
+  markApprovalResolved(localId: string): void {
+    this.db.prepare('UPDATE pending_approvals SET resolved_at = ? WHERE local_id = ?').run(Date.now(), localId);
+  }
+
+  countPendingApprovals(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM pending_approvals WHERE resolved_at IS NULL').get() as { count: number };
+    return Number(row.count);
+  }
+
+  insertAudit(direction: 'inbound' | 'outbound', chatId: string, eventType: string, summary: string): void {
+    this.db.prepare('INSERT INTO audit_logs (direction, chat_id, event_type, summary, created_at) VALUES (?, ?, ?, ?, ?)').run(direction, chatId, eventType, summary, Date.now());
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private mapApproval(row: Record<string, unknown>): PendingApprovalRecord {
+    return {
+      localId: String(row.local_id),
+      serverRequestId: String(row.server_request_id),
+      kind: row.kind === 'fileChange' ? 'fileChange' : 'command',
+      chatId: String(row.chat_id),
+      threadId: String(row.thread_id),
+      turnId: String(row.turn_id),
+      itemId: String(row.item_id),
+      approvalId: row.approval_id === null ? null : String(row.approval_id),
+      reason: row.reason === null ? null : String(row.reason),
+      command: row.command === null ? null : String(row.command),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      messageId: row.message_id === null ? null : Number(row.message_id),
+      createdAt: Number(row.created_at),
+      resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at)
+    };
+  }
+}

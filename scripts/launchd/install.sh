@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+PLIST="$HOME/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist"
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ganxing.telegram-codex-app-bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>node</string>
+    <string>$ROOT_DIR/dist/main.js</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$ROOT_DIR</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$HOME/.telegram-codex-app-bridge/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.telegram-codex-app-bridge/logs/launchd.err.log</string>
+</dict>
+</plist>
+PLIST
+launchctl unload "$PLIST" >/dev/null 2>&1 || true
+launchctl load "$PLIST"
+echo "Installed $PLIST"

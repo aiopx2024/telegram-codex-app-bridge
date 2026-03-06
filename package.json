@@ -1,0 +1,39 @@
+{
+  "name": "telegram-codex-app-bridge",
+  "version": "0.1.0",
+  "description": "Bridge a Telegram bot to a local Codex Desktop instance via codex app-server.",
+  "type": "module",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gan-Xing/telegram-codex-app-bridge.git"
+  },
+  "homepage": "https://github.com/Gan-Xing/telegram-codex-app-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Gan-Xing/telegram-codex-app-bridge/issues"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/main.ts serve",
+    "serve": "node dist/main.js serve",
+    "status": "node dist/main.js status",
+    "doctor": "node dist/main.js doctor",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "node --test --import tsx \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.22.0",
+    "@types/node": "^24.0.0",
+    "eslint": "^9.22.0",
+    "tsx": "^4.19.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.26.1"
+  }
+}
