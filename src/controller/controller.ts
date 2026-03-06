@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { AppConfig } from '../config.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { PendingApprovalRecord, RuntimeStatus } from '../types.js';
+import type { PendingApprovalRecord, RuntimeStatus, ThreadBinding } from '../types.js';
 import { parseCommand } from './commands.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest } from '../codex_app/client.js';
@@ -25,6 +25,7 @@ export class BridgeController {
   private activeTurns = new Map<string, ActiveTurn>();
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
+  private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
 
@@ -38,22 +39,32 @@ export class BridgeController {
 
   async start(): Promise<void> {
     this.bot.on('text', (event: TelegramTextEvent) => {
-      void this.withLock(event.chatId, async () => this.handleText(event));
+      void this.withLock(event.chatId, async () => this.handleText(event)).catch((error) => {
+        void this.handleAsyncError('telegram.text', error, event.chatId);
+      });
     });
     this.bot.on('callback', (event: TelegramCallbackEvent) => {
-      void this.handleCallback(event);
+      void this.handleCallback(event).catch((error) => {
+        void this.handleAsyncError('telegram.callback', error, event.chatId);
+      });
     });
     this.app.on('notification', (msg: JsonRpcNotification) => {
-      void this.handleNotification(msg);
+      void this.handleNotification(msg).catch((error) => {
+        void this.handleAsyncError('codex.notification', error);
+      });
     });
     this.app.on('serverRequest', (msg: JsonRpcServerRequest) => {
-      void this.handleServerRequest(msg);
+      void this.handleServerRequest(msg).catch((error) => {
+        void this.handleAsyncError('codex.server_request', error);
+      });
     });
     this.app.on('connected', () => {
+      this.attachedThreads.clear();
       this.lastError = null;
       this.updateStatus();
     });
     this.app.on('disconnected', () => {
+      this.attachedThreads.clear();
       this.updateStatus();
     });
 
@@ -100,11 +111,14 @@ export class BridgeController {
       return;
     }
 
-    const binding = this.store.getBinding(event.chatId) ?? await this.createBinding(event.chatId, null);
+    const existingBinding = this.store.getBinding(event.chatId);
+    const binding = existingBinding
+      ? await this.ensureThreadReady(event.chatId, existingBinding)
+      : await this.createBinding(event.chatId, null);
     await this.bot.sendTyping(event.chatId);
     const previewMessageId = await this.bot.sendMessage(event.chatId, 'Working...');
-    const turn = await this.app.startTurn(binding.threadId, event.text, this.config.defaultApprovalPolicy, binding.cwd ?? this.config.defaultCwd);
-    await this.registerActiveTurn(event.chatId, binding.threadId, turn.id, previewMessageId);
+    const turnState = await this.startTurnWithRecovery(event.chatId, binding, event.text);
+    await this.registerActiveTurn(event.chatId, turnState.threadId, turnState.turnId, previewMessageId);
   }
 
   private async handleCommand(event: TelegramTextEvent, name: string, args: string[]): Promise<void> {
@@ -310,9 +324,28 @@ export class BridgeController {
   private async createBinding(chatId: string, requestedCwd: string | null): Promise<{ threadId: string; cwd: string | null }> {
     const cwd = requestedCwd || this.config.defaultCwd;
     const thread = await this.app.startThread(cwd, this.config.defaultApprovalPolicy);
-    this.store.setBinding(chatId, String(thread.id), String(thread.cwd || cwd));
+    const threadId = String(thread.id);
+    const resolvedCwd = String(thread.cwd || cwd);
+    this.store.setBinding(chatId, threadId, resolvedCwd);
+    this.attachedThreads.add(threadId);
     this.updateStatus();
-    return { threadId: String(thread.id), cwd: String(thread.cwd || cwd) };
+    return { threadId, cwd: resolvedCwd };
+  }
+
+  private async startTurnWithRecovery(chatId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, text: string): Promise<{ threadId: string; turnId: string }> {
+    try {
+      const turn = await this.app.startTurn(binding.threadId, text, this.config.defaultApprovalPolicy, binding.cwd ?? this.config.defaultCwd);
+      return { threadId: binding.threadId, turnId: turn.id };
+    } catch (error) {
+      if (!isThreadNotFoundError(error)) {
+        throw error;
+      }
+      this.logger.warn('codex.turn_thread_not_found', { chatId, threadId: binding.threadId });
+      const replacement = await this.createBinding(chatId, binding.cwd ?? this.config.defaultCwd);
+      await this.bot.sendMessage(chatId, `Current thread was unavailable. Continued in a new thread ${replacement.threadId}.`);
+      const turn = await this.app.startTurn(replacement.threadId, text, this.config.defaultApprovalPolicy, replacement.cwd ?? this.config.defaultCwd);
+      return { threadId: replacement.threadId, turnId: turn.id };
+    }
   }
 
   private async registerActiveTurn(chatId: string, threadId: string, turnId: string, previewMessageId: number): Promise<void> {
@@ -389,6 +422,50 @@ export class BridgeController {
 
   private updateStatus(): void {
     writeRuntimeStatus(this.config.statusPath, this.getRuntimeStatus());
+  }
+
+  private async ensureThreadReady(chatId: string, binding: ThreadBinding): Promise<ThreadBinding> {
+    if (this.attachedThreads.has(binding.threadId)) {
+      return binding;
+    }
+    try {
+      const thread = await this.app.resumeThread(binding.threadId);
+      const normalized: ThreadBinding = {
+        chatId,
+        threadId: String(thread.id),
+        cwd: String(thread.cwd || binding.cwd || this.config.defaultCwd),
+        updatedAt: Date.now(),
+      };
+      this.store.setBinding(chatId, normalized.threadId, normalized.cwd);
+      this.attachedThreads.add(normalized.threadId);
+      this.updateStatus();
+      return normalized;
+    } catch (error) {
+      if (!isThreadNotFoundError(error)) {
+        throw error;
+      }
+      this.logger.warn('codex.thread_binding_stale', { chatId, threadId: binding.threadId });
+      const replacement = await this.createBinding(chatId, binding.cwd ?? this.config.defaultCwd);
+      await this.bot.sendMessage(chatId, `Previous thread was unavailable. Started a new thread ${replacement.threadId}.`);
+      return {
+        chatId,
+        threadId: replacement.threadId,
+        cwd: replacement.cwd,
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
+  private async handleAsyncError(source: string, error: unknown, chatId?: string): Promise<void> {
+    this.lastError = formatUserError(error);
+    this.logger.error(`${source}.failed`, { error: toErrorMeta(error), chatId: chatId ?? null });
+    this.updateStatus();
+    if (!chatId) return;
+    try {
+      await this.bot.sendMessage(chatId, `Bridge error: ${formatUserError(error)}`);
+    } catch (notifyError) {
+      this.logger.error('telegram.error_notification_failed', { error: toErrorMeta(notifyError), chatId });
+    }
   }
 
   private armApprovalTimer(localId: string): void {
@@ -469,4 +546,22 @@ function mapApprovalDecision(action: ApprovalAction): unknown {
       ? 'acceptForSession'
       : 'decline';
   return { decision };
+}
+
+function toErrorMeta(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return { message: error.message, stack: error.stack };
+  }
+  return { error: String(error) };
+}
+
+function formatUserError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function isThreadNotFoundError(error: unknown): boolean {
+  return error instanceof Error && /(thread not found|no rollout found for thread id)/i.test(error.message);
 }

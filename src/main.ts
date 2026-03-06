@@ -66,6 +66,14 @@ async function main(): Promise<void> {
   );
   const controller = new BridgeController(config, store, logger, bot, app);
 
+  process.on('unhandledRejection', (error) => {
+    logger.error('process.unhandled_rejection', { error: serializeError(error) });
+  });
+
+  process.on('uncaughtException', (error) => {
+    logger.error('process.uncaught_exception', { error: serializeError(error) });
+  });
+
   await controller.start();
   logger.info('bridge.started', controller.getRuntimeStatus());
 
@@ -104,4 +112,11 @@ function hasCommand(commandName: string): boolean {
   } catch {
     return false;
   }
+}
+
+function serializeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return { message: error.message, stack: error.stack };
+  }
+  return { error: String(error) };
 }
