@@ -29,11 +29,15 @@ import {
   type TelegramInboundAttachment,
 } from '../telegram/media.js';
 import { chunkTelegramMessage, sanitizeTelegramPreview } from '../telegram/text.js';
+import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
+import { parseTelegramScopeId } from '../telegram/scope.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
 import { writeRuntimeStatus } from '../runtime.js';
 
 interface ActiveTurn {
+  scopeId: string;
   chatId: string;
+  topicId: number | null;
   threadId: string;
   turnId: string;
   previewMessageId: number;
@@ -65,13 +69,13 @@ export class BridgeController {
 
   async start(): Promise<void> {
     this.bot.on('text', (event: TelegramTextEvent) => {
-      void this.withLock(event.chatId, async () => this.handleText(event)).catch((error) => {
-        void this.handleAsyncError('telegram.text', error, event.chatId);
+      void this.withLock(event.scopeId, async () => this.handleText(event)).catch((error) => {
+        void this.handleAsyncError('telegram.text', error, event.scopeId);
       });
     });
     this.bot.on('callback', (event: TelegramCallbackEvent) => {
       void this.handleCallback(event).catch((error) => {
-        void this.handleAsyncError('telegram.callback', error, event.chatId);
+        void this.handleAsyncError('telegram.callback', error, event.scopeId);
       });
     });
     this.app.on('notification', (msg: JsonRpcNotification) => {
@@ -125,35 +129,54 @@ export class BridgeController {
   }
 
   private async handleText(event: TelegramTextEvent): Promise<void> {
-    const locale = this.localeForChat(event.chatId, event.languageCode);
-    this.store.insertAudit('inbound', event.chatId, 'telegram.message', summarizeTelegramInput(event.text, event.attachments));
+    const scopeId = event.scopeId;
+    const locale = this.localeForChat(scopeId, event.languageCode);
+    this.store.insertAudit('inbound', scopeId, 'telegram.message', summarizeTelegramInput(event.text, event.attachments));
     const command = event.attachments.length === 0 ? parseCommand(event.text) : null;
-    if (command && event.text.trim()) {
-      await this.handleCommand(event, locale, command.name, command.args);
+    const decision = resolveTelegramAddressing({
+      text: event.text,
+      attachmentsCount: event.attachments.length,
+      entities: event.entities,
+      command,
+      botUsername: this.botUsername,
+      isDefaultTopic: isDefaultTelegramScope({
+        chatType: event.chatType,
+        allowedChatId: this.config.tgAllowedChatId,
+        allowedTopicId: this.config.tgAllowedTopicId,
+        topicId: event.topicId,
+      }),
+      replyToBot: event.replyToBot,
+    });
+    if (decision.kind === 'ignore') {
+      return;
+    }
+    if (decision.kind === 'command') {
+      await this.handleCommand(event, locale, decision.command.name, decision.command.args);
       return;
     }
 
-    if (this.findActiveTurn(event.chatId)) {
-      await this.bot.sendMessage(event.chatId, t(locale, 'another_turn_running'));
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'another_turn_running'));
       return;
     }
 
-    const existingBinding = this.store.getBinding(event.chatId);
+    const existingBinding = this.store.getBinding(scopeId);
     const binding = existingBinding
-      ? await this.ensureThreadReady(event.chatId, existingBinding)
-      : await this.createBinding(event.chatId, null);
-    await this.bot.sendTyping(event.chatId);
-    const previewMessageId = await this.bot.sendMessage(event.chatId, t(locale, 'working'));
-    const input = await this.buildTurnInput(binding, event, locale);
-    const turnState = await this.startTurnWithRecovery(event.chatId, binding, input);
-    await this.registerActiveTurn(event.chatId, turnState.threadId, turnState.turnId, previewMessageId);
+      ? await this.ensureThreadReady(scopeId, existingBinding)
+      : await this.createBinding(scopeId, null);
+    await this.sendTyping(scopeId);
+    const previewMessageId = await this.sendMessage(scopeId, t(locale, 'working'));
+    const input = await this.buildTurnInput(binding, { ...event, text: decision.text }, locale);
+    const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
+    await this.registerActiveTurn(scopeId, event.chatId, event.topicId, turnState.threadId, turnState.turnId, previewMessageId);
   }
 
   private async handleCommand(event: TelegramTextEvent, locale: AppLocale, name: string, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
     switch (name) {
       case 'start':
       case 'help': {
-        await this.bot.sendMessage(event.chatId, [
+        await this.sendMessage(scopeId, [
           t(locale, 'help_commands_title'),
           '/help',
           '/status',
@@ -170,8 +193,8 @@ export class BridgeController {
         return;
       }
       case 'status': {
-        const binding = this.store.getBinding(event.chatId);
-        const settings = this.store.getChatSettings(event.chatId);
+        const binding = this.store.getBinding(scopeId);
+        const settings = this.store.getChatSettings(scopeId);
         const lines = [
           t(locale, 'status_connected', { value: t(locale, this.app.isConnected() ? 'yes' : 'no') }),
           t(locale, 'status_user_agent', { value: this.app.getUserAgent() ?? t(locale, 'unknown') }),
@@ -183,40 +206,40 @@ export class BridgeController {
           t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
-        await this.bot.sendMessage(event.chatId, lines.join('\n'));
+        await this.sendMessage(scopeId, lines.join('\n'));
         return;
       }
       case 'where': {
-        await this.showWherePanel(event.chatId, undefined, locale);
+        await this.showWherePanel(scopeId, undefined, locale);
         return;
       }
       case 'threads': {
         const searchTerm = args.join(' ').trim() || null;
-        await this.showThreadsPanel(event.chatId, undefined, searchTerm, locale);
+        await this.showThreadsPanel(scopeId, undefined, searchTerm, locale);
         return;
       }
       case 'open': {
         const target = Number.parseInt(args[0] || '', 10);
         if (!Number.isFinite(target)) {
-          await this.bot.sendMessage(event.chatId, t(locale, 'usage_open'));
+          await this.sendMessage(scopeId, t(locale, 'usage_open'));
           return;
         }
-        const thread = this.store.getCachedThread(event.chatId, target);
+        const thread = this.store.getCachedThread(scopeId, target);
         if (!thread) {
-          await this.bot.sendMessage(event.chatId, t(locale, 'unknown_cached_thread'));
+          await this.sendMessage(scopeId, t(locale, 'unknown_cached_thread'));
           return;
         }
         let binding: ThreadBinding;
         try {
-          binding = await this.bindCachedThread(event.chatId, thread.threadId);
+          binding = await this.bindCachedThread(scopeId, thread.threadId);
         } catch (error) {
           if (isThreadNotFoundError(error)) {
-            await this.bot.sendMessage(event.chatId, t(locale, 'cached_thread_unavailable'));
+            await this.sendMessage(scopeId, t(locale, 'cached_thread_unavailable'));
             return;
           }
           throw error;
         }
-        const settings = this.store.getChatSettings(event.chatId);
+        const settings = this.store.getChatSettings(scopeId);
         const lines = [
           t(locale, 'bound_to_thread', { threadId: binding.threadId }),
           t(locale, 'line_title', { value: thread.name || thread.preview || t(locale, 'empty') }),
@@ -225,17 +248,17 @@ export class BridgeController {
           t(locale, 'line_cwd', { value: binding.cwd ?? this.config.defaultCwd }),
         ];
         if (this.config.codexAppSyncOnOpen) {
-          const revealError = await this.tryRevealThread(event.chatId, binding.threadId, 'open');
+          const revealError = await this.tryRevealThread(scopeId, binding.threadId, 'open');
           lines.push(revealError ? t(locale, 'codex_sync_failed', { error: revealError }) : t(locale, 'opened_in_codex'));
         }
-        await this.bot.sendMessage(event.chatId, lines.join('\n'));
+        await this.sendMessage(scopeId, lines.join('\n'));
         return;
       }
       case 'new': {
         const cwd = args.join(' ').trim() || this.config.defaultCwd;
-        const binding = await this.createBinding(event.chatId, cwd);
-        const settings = this.store.getChatSettings(event.chatId);
-        await this.bot.sendMessage(event.chatId, [
+        const binding = await this.createBinding(scopeId, cwd);
+        const settings = this.store.getChatSettings(scopeId);
+        await this.sendMessage(scopeId, [
           t(locale, 'started_new_thread', { threadId: binding.threadId }),
           t(locale, 'line_cwd', { value: binding.cwd ?? cwd }),
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
@@ -248,7 +271,7 @@ export class BridgeController {
         return;
       }
       case 'models': {
-        await this.showModelSettingsPanel(event.chatId, undefined, locale);
+        await this.showModelSettingsPanel(scopeId, undefined, locale);
         return;
       }
       case 'effort': {
@@ -257,38 +280,39 @@ export class BridgeController {
       }
       case 'reveal':
       case 'focus': {
-        const binding = this.store.getBinding(event.chatId);
+        const binding = this.store.getBinding(scopeId);
         if (!binding) {
-          await this.bot.sendMessage(event.chatId, t(locale, 'no_thread_bound_reveal'));
+          await this.sendMessage(scopeId, t(locale, 'no_thread_bound_reveal'));
           return;
         }
-        const readyBinding = await this.ensureThreadReady(event.chatId, binding);
-        const revealError = await this.tryRevealThread(event.chatId, readyBinding.threadId, 'reveal');
+        const readyBinding = await this.ensureThreadReady(scopeId, binding);
+        const revealError = await this.tryRevealThread(scopeId, readyBinding.threadId, 'reveal');
         if (revealError) {
-          await this.bot.sendMessage(event.chatId, t(locale, 'failed_open_codex', { error: revealError }));
+          await this.sendMessage(scopeId, t(locale, 'failed_open_codex', { error: revealError }));
           return;
         }
-        await this.bot.sendMessage(event.chatId, t(locale, 'opened_thread_in_codex', { threadId: readyBinding.threadId }));
+        await this.sendMessage(scopeId, t(locale, 'opened_thread_in_codex', { threadId: readyBinding.threadId }));
         return;
       }
       case 'interrupt': {
-        const active = this.findActiveTurn(event.chatId);
+        const active = this.findActiveTurn(scopeId);
         if (!active) {
-          await this.bot.sendMessage(event.chatId, t(locale, 'no_active_turn'));
+          await this.sendMessage(scopeId, t(locale, 'no_active_turn'));
           return;
         }
         await this.requestInterrupt(active);
-        await this.bot.sendMessage(event.chatId, t(locale, 'interrupt_requested_for', { turnId: active.turnId }));
+        await this.sendMessage(scopeId, t(locale, 'interrupt_requested_for', { turnId: active.turnId }));
         return;
       }
       default: {
-        await this.bot.sendMessage(event.chatId, t(locale, 'unknown_command', { name }));
+        await this.sendMessage(scopeId, t(locale, 'unknown_command', { name }));
       }
     }
   }
 
   private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
-    const locale = this.localeForChat(event.chatId, event.languageCode);
+    const scopeId = event.scopeId;
+    const locale = this.localeForChat(scopeId, event.languageCode);
     const interruptMatch = /^turn:interrupt:(.+)$/.exec(event.data);
     if (interruptMatch) {
       await this.handleTurnInterruptCallback(event, interruptMatch[1]!, locale);
@@ -321,7 +345,7 @@ export class BridgeController {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'approval_already_resolved'));
       return;
     }
-    if (approval.chatId !== event.chatId || (approval.messageId !== null && approval.messageId !== event.messageId)) {
+    if (approval.chatId !== scopeId || (approval.messageId !== null && approval.messageId !== event.messageId)) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'approval_mismatch'));
       return;
     }
@@ -332,7 +356,7 @@ export class BridgeController {
     this.clearApprovalTimer(localId);
     await this.bot.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     if (approval.messageId !== null) {
-      await this.bot.editMessage(event.chatId, approval.messageId, renderApprovalMessage(locale, approval, action));
+      await this.editMessage(scopeId, approval.messageId, renderApprovalMessage(locale, approval, action));
     }
     this.updateStatus();
   }
@@ -343,16 +367,16 @@ export class BridgeController {
         const params = notification.params as any;
         const threadId = String(params.session_id || '');
         if (!threadId) return;
-        const chatId = this.findChatByThread(threadId);
-        if (!chatId) return;
-        const binding = this.store.getBinding(chatId);
+        const scopeId = this.findChatByThread(threadId);
+        if (!scopeId) return;
+        const binding = this.store.getBinding(scopeId);
         const cwd = params.cwd ? String(params.cwd) : binding?.cwd ?? null;
-        this.store.setBinding(chatId, threadId, cwd);
-        const current = this.store.getChatSettings(chatId);
+        this.store.setBinding(scopeId, threadId, cwd);
+        const current = this.store.getChatSettings(scopeId);
         const preserveDefaultModel = current !== null && current.model === null;
         const preserveDefaultEffort = current !== null && current.reasoningEffort === null;
         this.store.setChatSettings(
-          chatId,
+          scopeId,
           preserveDefaultModel
             ? null
             : params.model
@@ -382,7 +406,7 @@ export class BridgeController {
         if (params.item?.type !== 'agentMessage') return;
         const active = this.activeTurns.get(String(params.turnId));
         if (!active) return;
-        active.finalText = String(params.item.text || active.buffer || t(this.localeForChat(active.chatId), 'completed'));
+        active.finalText = String(params.item.text || active.buffer || t(this.localeForChat(active.scopeId), 'completed'));
         return;
       }
       case 'turn/completed': {
@@ -392,10 +416,10 @@ export class BridgeController {
         try {
           await this.completeTurn(active);
           if (this.config.codexAppSyncOnTurnComplete) {
-            const revealError = await this.tryRevealThread(active.chatId, active.threadId, 'turn-complete');
+            const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
             if (revealError) {
               this.logger.warn('codex.reveal_thread_failed', {
-                chatId: active.chatId,
+                scopeId: active.scopeId,
                 threadId: active.threadId,
                 reason: 'turn-complete',
                 error: revealError,
@@ -426,7 +450,7 @@ export class BridgeController {
         const params = request.params as any;
         const approval = this.createApprovalRecord('command', request.id, params);
         const locale = this.localeForChat(approval.chatId);
-        const messageId = await this.bot.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
+        const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
         this.store.updatePendingApprovalMessage(approval.localId, messageId);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
@@ -436,7 +460,7 @@ export class BridgeController {
         const params = request.params as any;
         const approval = this.createApprovalRecord('fileChange', request.id, params);
         const locale = this.localeForChat(approval.chatId);
-        const messageId = await this.bot.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
+        const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
         this.store.updatePendingApprovalMessage(approval.localId, messageId);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
@@ -444,9 +468,9 @@ export class BridgeController {
       }
       case 'item/tool/requestUserInput': {
         const params = request.params as any;
-        const chatId = this.findChatByThread(params.threadId);
-        if (chatId) {
-          await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'interactive_input_unsupported'));
+        const scopeId = this.findChatByThread(params.threadId);
+        if (scopeId) {
+          await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'interactive_input_unsupported'));
         }
         await this.app.respond(request.id, { answers: {} });
         return;
@@ -457,19 +481,19 @@ export class BridgeController {
     }
   }
 
-  private async createBinding(chatId: string, requestedCwd: string | null): Promise<ThreadBinding> {
+  private async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
     const cwd = requestedCwd || this.config.defaultCwd;
-    const settings = this.store.getChatSettings(chatId);
+    const settings = this.store.getChatSettings(scopeId);
     const session = await this.app.startThread({
       cwd,
       approvalPolicy: this.config.defaultApprovalPolicy,
       model: settings?.model ?? null,
     });
-    return this.storeThreadSession(chatId, session, 'seed');
+    return this.storeThreadSession(scopeId, session, 'seed');
   }
 
-  private async startTurnWithRecovery(chatId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, input: TurnInput[]): Promise<{ threadId: string; turnId: string }> {
-    const settings = this.store.getChatSettings(chatId);
+  private async startTurnWithRecovery(scopeId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, input: TurnInput[]): Promise<{ threadId: string; turnId: string }> {
+    const settings = this.store.getChatSettings(scopeId);
     try {
       const turn = await this.app.startTurn({
         threadId: binding.threadId,
@@ -484,10 +508,10 @@ export class BridgeController {
       if (!isThreadNotFoundError(error)) {
         throw error;
       }
-      this.logger.warn('codex.turn_thread_not_found', { chatId, threadId: binding.threadId });
-      const replacement = await this.createBinding(chatId, binding.cwd ?? this.config.defaultCwd);
-      await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
-      const nextSettings = this.store.getChatSettings(chatId);
+      this.logger.warn('codex.turn_thread_not_found', { scopeId, threadId: binding.threadId });
+      const replacement = await this.createBinding(scopeId, binding.cwd ?? this.config.defaultCwd);
+      await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
+      const nextSettings = this.store.getChatSettings(scopeId);
       const turn = await this.app.startTurn({
         threadId: replacement.threadId,
         input,
@@ -579,13 +603,22 @@ export class BridgeController {
     return staged;
   }
 
-  private async registerActiveTurn(chatId: string, threadId: string, turnId: string, previewMessageId: number): Promise<void> {
+  private async registerActiveTurn(
+    scopeId: string,
+    chatId: string,
+    topicId: number | null,
+    threadId: string,
+    turnId: string,
+    previewMessageId: number,
+  ): Promise<void> {
     let resolveTurn!: () => void;
     const waitForTurn = new Promise<void>((resolve) => {
       resolveTurn = resolve;
     });
     const active: ActiveTurn = {
+      scopeId,
       chatId,
+      topicId,
       threadId,
       turnId,
       previewMessageId,
@@ -598,11 +631,11 @@ export class BridgeController {
     this.activeTurns.set(turnId, active);
     this.updateStatus();
     try {
-      await this.bot.editMessage(
-        chatId,
+      await this.editMessage(
+        scopeId,
         previewMessageId,
         this.renderActivePreview(active),
-        activeTurnKeyboard(this.localeForChat(chatId), turnId),
+        activeTurnKeyboard(this.localeForChat(scopeId), turnId),
       );
     } catch (error) {
       this.logger.warn('telegram.preview_keyboard_attach_failed', { error: String(error), turnId });
@@ -616,11 +649,11 @@ export class BridgeController {
     const text = this.renderActivePreview(active);
     active.lastFlushAt = now;
     try {
-      await this.bot.editMessage(
-        active.chatId,
+      await this.editMessage(
+        active.scopeId,
         active.previewMessageId,
         text,
-        active.interruptRequested ? [] : activeTurnKeyboard(this.localeForChat(active.chatId), active.turnId),
+        active.interruptRequested ? [] : activeTurnKeyboard(this.localeForChat(active.scopeId), active.turnId),
       );
     } catch (error) {
       this.logger.warn('telegram.preview_edit_failed', { error: String(error) });
@@ -628,18 +661,18 @@ export class BridgeController {
   }
 
   private async completeTurn(active: ActiveTurn): Promise<void> {
-    const locale = this.localeForChat(active.chatId);
+    const locale = this.localeForChat(active.scopeId);
     const finalChunks = chunkTelegramMessage(active.finalText || active.buffer || t(locale, 'completed'));
     for (const chunk of finalChunks) {
-      await this.bot.sendMessage(active.chatId, chunk);
+      await this.sendMessage(active.scopeId, chunk);
     }
 
     try {
-      await this.bot.deleteMessage(active.chatId, active.previewMessageId);
+      await this.deleteMessage(active.scopeId, active.previewMessageId);
     } catch (error) {
       this.logger.warn('telegram.preview_delete_failed', { error: String(error) });
       try {
-        await this.bot.editMessage(active.chatId, active.previewMessageId, t(locale, 'completed_see_reply_below'), []);
+        await this.editMessage(active.scopeId, active.previewMessageId, t(locale, 'completed_see_reply_below'), []);
       } catch (fallbackError) {
         this.logger.warn('telegram.preview_cleanup_failed', { error: String(fallbackError) });
       }
@@ -648,15 +681,15 @@ export class BridgeController {
 
   private createApprovalRecord(kind: PendingApprovalRecord['kind'], serverRequestId: string | number, params: any): PendingApprovalRecord {
     const threadId = String(params.threadId);
-    const chatId = this.findChatByThread(threadId);
-    if (!chatId) {
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
       throw new Error(`No chat binding found for thread ${threadId}`);
     }
     const record: PendingApprovalRecord = {
       localId: crypto.randomBytes(8).toString('hex'),
       serverRequestId: String(serverRequestId),
       kind,
-      chatId,
+      chatId: scopeId,
       threadId,
       turnId: String(params.turnId),
       itemId: String(params.itemId),
@@ -674,19 +707,19 @@ export class BridgeController {
 
   private findChatByThread(threadId: string): string | null {
     for (const turn of this.activeTurns.values()) {
-      if (turn.threadId === threadId) return turn.chatId;
+      if (turn.threadId === threadId) return turn.scopeId;
     }
     return this.store.findChatIdByThreadId(threadId);
   }
 
-  private withLock(chatId: string, fn: () => Promise<void>): Promise<void> {
-    const previous = this.locks.get(chatId) || Promise.resolve();
+  private withLock(scopeId: string, fn: () => Promise<void>): Promise<void> {
+    const previous = this.locks.get(scopeId) || Promise.resolve();
     const next = previous.then(fn, fn).finally(() => {
-      if (this.locks.get(chatId) === next) {
-        this.locks.delete(chatId);
+      if (this.locks.get(scopeId) === next) {
+        this.locks.delete(scopeId);
       }
     });
-    this.locks.set(chatId, next);
+    this.locks.set(scopeId, next);
     return next;
   }
 
@@ -694,22 +727,70 @@ export class BridgeController {
     writeRuntimeStatus(this.config.statusPath, this.getRuntimeStatus());
   }
 
-  private async ensureThreadReady(chatId: string, binding: ThreadBinding): Promise<ThreadBinding> {
+  private async sendMessage(
+    scopeId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    const target = parseTelegramScopeId(scopeId);
+    return this.bot.sendMessage(target.chatId, text, inlineKeyboard, target.topicId);
+  }
+
+  private async sendHtmlMessage(
+    scopeId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    const target = parseTelegramScopeId(scopeId);
+    return this.bot.sendHtmlMessage(target.chatId, text, inlineKeyboard, target.topicId);
+  }
+
+  private async editMessage(
+    scopeId: string,
+    messageId: number,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    const target = parseTelegramScopeId(scopeId);
+    await this.bot.editMessage(target.chatId, messageId, text, inlineKeyboard);
+  }
+
+  private async editHtmlMessage(
+    scopeId: string,
+    messageId: number,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    const target = parseTelegramScopeId(scopeId);
+    await this.bot.editHtmlMessage(target.chatId, messageId, text, inlineKeyboard);
+  }
+
+  private async deleteMessage(scopeId: string, messageId: number): Promise<void> {
+    const target = parseTelegramScopeId(scopeId);
+    await this.bot.deleteMessage(target.chatId, messageId);
+  }
+
+  private async sendTyping(scopeId: string): Promise<void> {
+    const target = parseTelegramScopeId(scopeId);
+    await this.bot.sendTypingInThread(target.chatId, target.topicId);
+  }
+
+  private async ensureThreadReady(scopeId: string, binding: ThreadBinding): Promise<ThreadBinding> {
     if (this.attachedThreads.has(binding.threadId)) {
       return binding;
     }
     try {
       const session = await this.app.resumeThread({ threadId: binding.threadId });
-      return this.storeThreadSession(chatId, session, 'seed');
+      return this.storeThreadSession(scopeId, session, 'seed');
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
         throw error;
       }
-      this.logger.warn('codex.thread_binding_stale', { chatId, threadId: binding.threadId });
-      const replacement = await this.createBinding(chatId, binding.cwd ?? this.config.defaultCwd);
-      await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'previous_thread_unavailable_started', { threadId: replacement.threadId }));
+      this.logger.warn('codex.thread_binding_stale', { scopeId, threadId: binding.threadId });
+      const replacement = await this.createBinding(scopeId, binding.cwd ?? this.config.defaultCwd);
+      await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'previous_thread_unavailable_started', { threadId: replacement.threadId }));
       return {
-        chatId,
+        chatId: scopeId,
         threadId: replacement.threadId,
         cwd: replacement.cwd,
         updatedAt: Date.now(),
@@ -717,15 +798,15 @@ export class BridgeController {
     }
   }
 
-  private async handleAsyncError(source: string, error: unknown, chatId?: string): Promise<void> {
+  private async handleAsyncError(source: string, error: unknown, scopeId?: string): Promise<void> {
     this.lastError = formatUserError(error);
-    this.logger.error(`${source}.failed`, { error: toErrorMeta(error), chatId: chatId ?? null });
+    this.logger.error(`${source}.failed`, { error: toErrorMeta(error), scopeId: scopeId ?? null });
     this.updateStatus();
-    if (!chatId) return;
+    if (!scopeId) return;
     try {
-      await this.bot.sendMessage(chatId, t(this.localeForChat(chatId), 'bridge_error', { error: formatUserError(error) }));
+      await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'bridge_error', { error: formatUserError(error) }));
     } catch (notifyError) {
-      this.logger.error('telegram.error_notification_failed', { error: toErrorMeta(notifyError), chatId });
+      this.logger.error('telegram.error_notification_failed', { error: toErrorMeta(notifyError), scopeId });
     }
   }
 
@@ -755,9 +836,9 @@ export class BridgeController {
       this.store.markApprovalResolved(localId);
       const locale = this.localeForChat(approval.chatId);
       if (approval.messageId !== null) {
-        await this.bot.editMessage(approval.chatId, approval.messageId, renderApprovalMessage(locale, approval, 'deny'));
+        await this.editMessage(approval.chatId, approval.messageId, renderApprovalMessage(locale, approval, 'deny'));
       } else {
-        await this.bot.sendMessage(approval.chatId, t(locale, 'approval_timed_out_denied', { threadId: approval.threadId }));
+        await this.sendMessage(approval.chatId, t(locale, 'approval_timed_out_denied', { threadId: approval.threadId }));
       }
     } catch (error) {
       this.lastError = String(error);
@@ -768,23 +849,23 @@ export class BridgeController {
     }
   }
 
-  private async tryRevealThread(chatId: string, threadId: string, reason: 'open' | 'reveal' | 'turn-complete'): Promise<string | null> {
+  private async tryRevealThread(scopeId: string, threadId: string, reason: 'open' | 'reveal' | 'turn-complete'): Promise<string | null> {
     try {
       await this.app.revealThread(threadId);
-      this.store.insertAudit('outbound', chatId, 'codex.app.reveal', `${reason}:${threadId}`);
+      this.store.insertAudit('outbound', scopeId, 'codex.app.reveal', `${reason}:${threadId}`);
       return null;
     } catch (error) {
       return formatUserError(error);
     }
   }
 
-  private async bindCachedThread(chatId: string, threadId: string): Promise<ThreadBinding> {
+  private async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
     const session = await this.app.resumeThread({ threadId });
-    return this.storeThreadSession(chatId, session, 'replace');
+    return this.storeThreadSession(scopeId, session, 'replace');
   }
 
-  private storeThreadSession(chatId: string, session: ThreadSessionState, syncMode: 'replace' | 'seed'): ThreadBinding {
-    const existing = this.store.getChatSettings(chatId);
+  private storeThreadSession(scopeId: string, session: ThreadSessionState, syncMode: 'replace' | 'seed'): ThreadBinding {
+    const existing = this.store.getChatSettings(scopeId);
     const hasExisting = existing !== null;
     const model = syncMode === 'seed'
       ? hasExisting ? existing.model : session.model
@@ -793,51 +874,52 @@ export class BridgeController {
       ? hasExisting ? existing.reasoningEffort : session.reasoningEffort
       : session.reasoningEffort;
     const normalized: ThreadBinding = {
-      chatId,
+      chatId: scopeId,
       threadId: session.thread.threadId,
       cwd: session.cwd,
       updatedAt: Date.now(),
     };
-    this.store.setBinding(chatId, normalized.threadId, normalized.cwd);
-    this.store.setChatSettings(chatId, model, effort);
+    this.store.setBinding(scopeId, normalized.threadId, normalized.cwd);
+    this.store.setChatSettings(scopeId, model, effort);
     this.attachedThreads.add(normalized.threadId);
     this.updateStatus();
     return normalized;
   }
 
-  private localeForChat(chatId: string, languageCode?: string | null): AppLocale {
+  private localeForChat(scopeId: string, languageCode?: string | null): AppLocale {
     if (languageCode) {
       const locale = normalizeLocale(languageCode);
-      const current = this.store.getChatSettings(chatId);
+      const current = this.store.getChatSettings(scopeId);
       if (current?.locale !== locale) {
-        this.store.setChatLocale(chatId, locale);
+        this.store.setChatLocale(scopeId, locale);
       }
       return locale;
     }
-    return this.store.getChatSettings(chatId)?.locale ?? 'en';
+    return this.store.getChatSettings(scopeId)?.locale ?? 'en';
   }
 
-  private findActiveTurn(chatId: string): ActiveTurn | undefined {
-    return [...this.activeTurns.values()].find(turn => turn.chatId === chatId);
+  private findActiveTurn(scopeId: string): ActiveTurn | undefined {
+    return [...this.activeTurns.values()].find(turn => turn.scopeId === scopeId);
   }
 
   private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
     if (args.length === 0) {
-      await this.showModelSettingsPanel(event.chatId, undefined, locale);
+      await this.showModelSettingsPanel(scopeId, undefined, locale);
       return;
     }
 
-    if (this.findActiveTurn(event.chatId)) {
-      await this.bot.sendMessage(event.chatId, t(locale, 'model_change_blocked'));
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'model_change_blocked'));
       return;
     }
-    const settings = this.store.getChatSettings(event.chatId);
+    const settings = this.store.getChatSettings(scopeId);
     const raw = args.join(' ').trim();
     const models = await this.app.listModels();
     if (raw === '' || raw.toLowerCase() === 'default' || raw.toLowerCase() === 'reset') {
       const defaultModel = resolveCurrentModel(models, null);
       const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
-      this.store.setChatSettings(event.chatId, null, nextEffort.effort);
+      this.store.setChatSettings(scopeId, null, nextEffort.effort);
       const lines = [
         t(locale, 'model_reset'),
         t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
@@ -847,18 +929,18 @@ export class BridgeController {
       if (nextEffort.adjustedFrom) {
         lines.splice(1, 0, t(locale, 'effort_adjusted_default_model', { effort: nextEffort.adjustedFrom }));
       }
-      await this.bot.sendMessage(event.chatId, lines.join('\n'));
+      await this.sendMessage(scopeId, lines.join('\n'));
       return;
     }
 
     const selected = resolveRequestedModel(models, raw);
     if (!selected) {
-      await this.bot.sendMessage(event.chatId, t(locale, 'unknown_model', { model: raw }));
+      await this.sendMessage(scopeId, t(locale, 'unknown_model', { model: raw }));
       return;
     }
 
     const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
-    this.store.setChatSettings(event.chatId, selected.model, nextEffort.effort);
+    this.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
     const lines = [
       t(locale, 'model_configured', { model: selected.model }),
       t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
@@ -868,26 +950,27 @@ export class BridgeController {
     if (nextEffort.adjustedFrom) {
       lines.splice(1, 0, t(locale, 'effort_adjusted_model', { effort: nextEffort.adjustedFrom, model: selected.model }));
     }
-    await this.bot.sendMessage(event.chatId, lines.join('\n'));
+    await this.sendMessage(scopeId, lines.join('\n'));
   }
 
   private async handleEffortCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
     if (args.length === 0) {
-      await this.showModelSettingsPanel(event.chatId, undefined, locale);
+      await this.showModelSettingsPanel(scopeId, undefined, locale);
       return;
     }
 
-    if (this.findActiveTurn(event.chatId)) {
-      await this.bot.sendMessage(event.chatId, t(locale, 'effort_change_blocked'));
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'effort_change_blocked'));
       return;
     }
-    const settings = this.store.getChatSettings(event.chatId);
+    const settings = this.store.getChatSettings(scopeId);
     const models = await this.app.listModels();
     const currentModel = resolveCurrentModel(models, settings?.model ?? null);
     const raw = args.join(' ').trim().toLowerCase();
     if (raw === 'default' || raw === 'reset') {
-      this.store.setChatSettings(event.chatId, settings?.model ?? null, null);
-      await this.bot.sendMessage(event.chatId, [
+      this.store.setChatSettings(scopeId, settings?.model ?? null, null);
+      await this.sendMessage(scopeId, [
         t(locale, 'effort_reset'),
         t(locale, 'applies_next_turn'),
         t(locale, 'tip_use_models'),
@@ -897,12 +980,12 @@ export class BridgeController {
 
     const effort = normalizeRequestedEffort(raw);
     if (!effort) {
-      await this.bot.sendMessage(event.chatId, t(locale, 'usage_effort'));
+      await this.sendMessage(scopeId, t(locale, 'usage_effort'));
       return;
     }
     if (currentModel && currentModel.supportedReasoningEfforts.length > 0 && !currentModel.supportedReasoningEfforts.includes(effort)) {
-      await this.bot.sendMessage(
-        event.chatId,
+      await this.sendMessage(
+        scopeId,
         t(locale, 'model_does_not_support_effort', {
           model: currentModel.model,
           effort,
@@ -911,8 +994,8 @@ export class BridgeController {
       );
       return;
     }
-    this.store.setChatSettings(event.chatId, settings?.model ?? null, effort);
-    await this.bot.sendMessage(event.chatId, [
+    this.store.setChatSettings(scopeId, settings?.model ?? null, effort);
+    await this.sendMessage(scopeId, [
       t(locale, 'effort_configured', { effort }),
       t(locale, 'applies_next_turn'),
       t(locale, 'tip_use_models'),
@@ -920,9 +1003,10 @@ export class BridgeController {
   }
 
   private async handleThreadOpenCallback(event: TelegramCallbackEvent, threadId: string, locale: AppLocale): Promise<void> {
+    const scopeId = event.scopeId;
     let binding: ThreadBinding;
     try {
-      binding = await this.bindCachedThread(event.chatId, threadId);
+      binding = await this.bindCachedThread(scopeId, threadId);
     } catch (error) {
       if (isThreadNotFoundError(error)) {
         await this.bot.answerCallback(event.callbackQueryId, t(locale, 'thread_no_longer_available'));
@@ -931,10 +1015,10 @@ export class BridgeController {
       throw error;
     }
 
-    const threads = this.store.listCachedThreads(event.chatId);
+    const threads = this.store.listCachedThreads(scopeId);
     if (threads.length > 0) {
-      await this.bot.editHtmlMessage(
-        event.chatId,
+      await this.editHtmlMessage(
+        scopeId,
         event.messageId,
         formatThreadsMessage(locale, threads, binding.threadId),
         buildThreadsKeyboard(locale, threads),
@@ -943,15 +1027,16 @@ export class BridgeController {
 
     let callbackText = t(locale, 'thread_opened');
     if (this.config.codexAppSyncOnOpen) {
-      const revealError = await this.tryRevealThread(event.chatId, binding.threadId, 'open');
+      const revealError = await this.tryRevealThread(scopeId, binding.threadId, 'open');
       callbackText = revealError ? t(locale, 'opened_sync_failed_short') : t(locale, 'opened_in_codex_short');
     }
     await this.bot.answerCallback(event.callbackQueryId, callbackText);
   }
 
   private async handleTurnInterruptCallback(event: TelegramCallbackEvent, turnId: string, locale: AppLocale): Promise<void> {
+    const scopeId = event.scopeId;
     const active = this.activeTurns.get(turnId);
-    if (!active || active.chatId !== event.chatId) {
+    if (!active || active.scopeId !== scopeId) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'turn_already_finished'));
       return;
     }
@@ -973,30 +1058,31 @@ export class BridgeController {
     target: 'models' | 'threads' | 'reveal',
     locale: AppLocale,
   ): Promise<void> {
+    const scopeId = event.scopeId;
     if (target === 'models') {
-      await this.showModelSettingsPanel(event.chatId, event.messageId, locale);
+      await this.showModelSettingsPanel(scopeId, event.messageId, locale);
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'opened_model_settings'));
       return;
     }
     if (target === 'threads') {
-      await this.showThreadsPanel(event.chatId, event.messageId, undefined, locale);
+      await this.showThreadsPanel(scopeId, event.messageId, undefined, locale);
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'opened_thread_list'));
       return;
     }
 
-    const binding = this.store.getBinding(event.chatId);
+    const binding = this.store.getBinding(scopeId);
     if (!binding) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'no_thread_bound_callback'));
       return;
     }
-    const readyBinding = await this.ensureThreadReady(event.chatId, binding);
-    const revealError = await this.tryRevealThread(event.chatId, readyBinding.threadId, 'reveal');
+    const readyBinding = await this.ensureThreadReady(scopeId, binding);
+    const revealError = await this.tryRevealThread(scopeId, readyBinding.threadId, 'reveal');
     await this.bot.answerCallback(event.callbackQueryId, revealError ? t(locale, 'reveal_failed', { error: revealError }) : t(locale, 'opened_in_codex_short'));
   }
 
-  private async showWherePanel(chatId: string, messageId?: number, locale = this.localeForChat(chatId)): Promise<void> {
-    const binding = this.store.getBinding(chatId);
-    const settings = this.store.getChatSettings(chatId);
+  private async showWherePanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    const settings = this.store.getChatSettings(scopeId);
     if (!binding) {
       const text = [
         t(locale, 'where_no_thread_bound'),
@@ -1005,35 +1091,35 @@ export class BridgeController {
         t(locale, 'where_send_message_or_new'),
       ].join('\n');
       if (messageId !== undefined) {
-        await this.bot.editMessage(chatId, messageId, text, whereKeyboard(locale, false));
+        await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
         return;
       }
-      await this.bot.sendMessage(chatId, text, whereKeyboard(locale, false));
+      await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
       return;
     }
 
-    const readyBinding = await this.ensureThreadReady(chatId, binding);
+    const readyBinding = await this.ensureThreadReady(scopeId, binding);
     const thread = await this.app.readThread(readyBinding.threadId, false);
     if (!thread) {
       const text = t(locale, 'where_thread_unavailable', { threadId: readyBinding.threadId });
       if (messageId !== undefined) {
-        await this.bot.editMessage(chatId, messageId, text, whereKeyboard(locale, false));
+        await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
         return;
       }
-      await this.bot.sendMessage(chatId, text, whereKeyboard(locale, false));
+      await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
       return;
     }
 
-    const text = formatWhereMessage(locale, thread, this.store.getChatSettings(chatId), this.config.defaultCwd);
+    const text = formatWhereMessage(locale, thread, this.store.getChatSettings(scopeId), this.config.defaultCwd);
     if (messageId !== undefined) {
-      await this.bot.editMessage(chatId, messageId, text, whereKeyboard(locale, true));
+      await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, true));
       return;
     }
-    await this.bot.sendMessage(chatId, text, whereKeyboard(locale, true));
+    await this.sendMessage(scopeId, text, whereKeyboard(locale, true));
   }
 
-  private async showThreadsPanel(chatId: string, messageId?: number, searchTerm?: string | null, locale = this.localeForChat(chatId)): Promise<void> {
-    const binding = this.store.getBinding(chatId);
+  private async showThreadsPanel(scopeId: string, messageId?: number, searchTerm?: string | null, locale = this.localeForChat(scopeId)): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
     const threads = await this.app.listThreads({
       limit: this.config.threadListLimit,
       searchTerm: searchTerm ?? null,
@@ -1047,26 +1133,26 @@ export class BridgeController {
       status: thread.status,
       updatedAt: thread.updatedAt,
     }));
-    this.store.cacheThreadList(chatId, cached);
+    this.store.cacheThreadList(scopeId, cached);
     const text = formatThreadsMessage(locale, cached, binding?.threadId ?? null, searchTerm ?? null);
     const keyboard = buildThreadsKeyboard(locale, cached);
     if (messageId !== undefined) {
-      await this.bot.editHtmlMessage(chatId, messageId, text, keyboard);
+      await this.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
     }
-    await this.bot.sendHtmlMessage(chatId, text, keyboard);
+    await this.sendHtmlMessage(scopeId, text, keyboard);
   }
 
-  private async showModelSettingsPanel(chatId: string, messageId?: number, locale = this.localeForChat(chatId)): Promise<void> {
+  private async showModelSettingsPanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
     const models = await this.app.listModels();
-    const settings = this.store.getChatSettings(chatId);
+    const settings = this.store.getChatSettings(scopeId);
     const text = formatModelSettingsMessage(locale, models, settings);
     const keyboard = buildModelSettingsKeyboard(locale, models, settings);
     if (messageId !== undefined) {
-      await this.bot.editHtmlMessage(chatId, messageId, text, keyboard);
+      await this.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
     }
-    await this.bot.sendHtmlMessage(chatId, text, keyboard);
+    await this.sendHtmlMessage(scopeId, text, keyboard);
   }
 
   private async handleSettingsCallback(
@@ -1075,21 +1161,22 @@ export class BridgeController {
     rawValue: string,
     locale: AppLocale,
   ): Promise<void> {
-    if (this.findActiveTurn(event.chatId)) {
+    const scopeId = event.scopeId;
+    if (this.findActiveTurn(scopeId)) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
       return;
     }
 
     const models = await this.app.listModels();
-    const settings = this.store.getChatSettings(event.chatId);
+    const settings = this.store.getChatSettings(scopeId);
     const value = kind === 'model' ? decodeURIComponent(rawValue) : rawValue;
 
     if (kind === 'model') {
       if (value === 'default') {
         const defaultModel = resolveCurrentModel(models, null);
         const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
-        this.store.setChatSettings(event.chatId, null, nextEffort.effort);
-        await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+        this.store.setChatSettings(scopeId, null, nextEffort.effort);
+        await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
         await this.bot.answerCallback(event.callbackQueryId, t(locale, 'using_server_default_model'));
         return;
       }
@@ -1099,15 +1186,15 @@ export class BridgeController {
         return;
       }
       const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
-      this.store.setChatSettings(event.chatId, selected.model, nextEffort.effort);
-      await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+      this.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
+      await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'callback_model', { model: selected.model }));
       return;
     }
 
     if (value === 'default') {
-      this.store.setChatSettings(event.chatId, settings?.model ?? null, null);
-      await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+      this.store.setChatSettings(scopeId, settings?.model ?? null, null);
+      await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'using_default_effort'));
       return;
     }
@@ -1122,16 +1209,16 @@ export class BridgeController {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'effort_not_supported_by_model'));
       return;
     }
-    this.store.setChatSettings(event.chatId, settings?.model ?? null, effort);
-    await this.refreshModelSettingsPanel(event.chatId, event.messageId, locale, models);
+    this.store.setChatSettings(scopeId, settings?.model ?? null, effort);
+    await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
     await this.bot.answerCallback(event.callbackQueryId, t(locale, 'callback_effort', { effort }));
   }
 
-  private async refreshModelSettingsPanel(chatId: string, messageId: number, locale: AppLocale, models?: ModelInfo[]): Promise<void> {
+  private async refreshModelSettingsPanel(scopeId: string, messageId: number, locale: AppLocale, models?: ModelInfo[]): Promise<void> {
     const resolvedModels = models ?? await this.app.listModels();
-    const settings = this.store.getChatSettings(chatId);
-    await this.bot.editHtmlMessage(
-      chatId,
+    const settings = this.store.getChatSettings(scopeId);
+    await this.editHtmlMessage(
+      scopeId,
       messageId,
       formatModelSettingsMessage(locale, resolvedModels, settings),
       buildModelSettingsKeyboard(locale, resolvedModels, settings),
@@ -1142,8 +1229,8 @@ export class BridgeController {
     active.interruptRequested = true;
     try {
       await this.app.interruptTurn(active.threadId, active.turnId);
-      await this.bot.editMessage(
-        active.chatId,
+      await this.editMessage(
+        active.scopeId,
         active.previewMessageId,
         this.renderActivePreview(active),
         [],
@@ -1155,7 +1242,7 @@ export class BridgeController {
   }
 
   private renderActivePreview(active: ActiveTurn): string {
-    const locale = this.localeForChat(active.chatId);
+    const locale = this.localeForChat(active.scopeId);
     const content = active.buffer || active.finalText || t(locale, 'working');
     if (!active.interruptRequested) {
       return sanitizeTelegramPreview(content);

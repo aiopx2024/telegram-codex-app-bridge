@@ -17,7 +17,7 @@ const loggerStub = {
 };
 
 test('TelegramGateway emits media messages with caption and attachments', async () => {
-  const gateway = new TelegramGateway('token', '42', 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];
   gateway.on('text', (event: TelegramTextEvent) => {
     events.push(event);
@@ -40,6 +40,9 @@ test('TelegramGateway emits media messages with caption and attachments', async 
   assert.equal(events.length, 1);
   assert.equal(events[0]?.text, '看看这张图');
   assert.equal(events[0]?.attachments.length, 1);
+  assert.equal(events[0]?.scopeId, '99::root');
+  assert.equal(events[0]?.topicId, null);
+  assert.equal(events[0]?.replyToBot, false);
   assert.deepEqual(events[0]?.attachments[0], {
     kind: 'photo',
     fileId: 'large',
@@ -57,7 +60,7 @@ test('TelegramGateway emits media messages with caption and attachments', async 
 });
 
 test('TelegramGateway emits document-only messages with empty text', async () => {
-  const gateway = new TelegramGateway('token', '42', 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];
   gateway.on('text', (event: TelegramTextEvent) => {
     events.push(event);
@@ -84,4 +87,38 @@ test('TelegramGateway emits document-only messages with empty text', async () =>
   assert.equal(events[0]?.attachments.length, 1);
   assert.equal(events[0]?.attachments[0]?.kind, 'document');
   assert.equal(events[0]?.attachments[0]?.fileName, 'report.pdf');
+});
+
+test('TelegramGateway emits topic messages for the configured group chat', async () => {
+  const gateway = new TelegramGateway('token', '42', '-100123', 1000, storeStub as any, loggerStub as any);
+  const events: TelegramTextEvent[] = [];
+  gateway.on('text', (event: TelegramTextEvent) => {
+    events.push(event);
+  });
+  (gateway as any).botUserId = 777;
+
+  await (gateway as any).handleUpdate({
+    update_id: 3,
+    message: {
+      message_id: 12,
+      message_thread_id: 8,
+      chat: { id: -100123, type: 'supergroup' },
+      from: { id: 42 },
+      text: '@bot1 看下状态',
+      entities: [{ type: 'mention', offset: 0, length: 5 }],
+      reply_to_message: {
+        message_id: 7,
+        chat: { id: -100123, type: 'supergroup' },
+        from: { id: 777 },
+        text: 'previous reply',
+      },
+    },
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.scopeId, '-100123::8');
+  assert.equal(events[0]?.chatType, 'supergroup');
+  assert.equal(events[0]?.topicId, 8);
+  assert.equal(events[0]?.replyToBot, true);
+  assert.deepEqual(events[0]?.entities, [{ type: 'mention', offset: 0, length: 5 }]);
 });

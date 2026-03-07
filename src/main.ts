@@ -54,6 +54,7 @@ async function main(): Promise<void> {
   const bot = new TelegramGateway(
     config.tgBotToken,
     config.tgAllowedUserId,
+    config.tgAllowedChatId,
     config.telegramPollIntervalMs,
     store,
     logger,

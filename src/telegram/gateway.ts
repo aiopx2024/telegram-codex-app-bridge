@@ -4,6 +4,8 @@ import { callTelegramApi, downloadTelegramFile, getTelegramFile, type TelegramRe
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
 import { getTelegramCommands } from '../i18n.js';
+import { createTelegramScopeId } from './scope.js';
+import type { TelegramMessageEntity } from './addressing.js';
 import type { TelegramInboundAttachment } from './media.js';
 
 interface TelegramUser {
@@ -23,9 +25,14 @@ interface TelegramChat {
 interface TelegramMessage {
   message_id: number;
   chat: TelegramChat;
+  message_thread_id?: number;
+  is_topic_message?: boolean;
   from?: TelegramUser;
   text?: string;
   caption?: string;
+  entities?: TelegramMessageEntity[];
+  caption_entities?: TelegramMessageEntity[];
+  reply_to_message?: TelegramMessage;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
   audio?: TelegramAudio;
@@ -60,15 +67,22 @@ interface SendMessageResult {
 
 export interface TelegramTextEvent {
   chatId: string;
+  topicId: number | null;
+  scopeId: string;
+  chatType: string;
   userId: string;
   text: string;
   messageId: number;
   attachments: TelegramInboundAttachment[];
+  entities: TelegramMessageEntity[];
+  replyToBot: boolean;
   languageCode?: string;
 }
 
 export interface TelegramCallbackEvent {
   chatId: string;
+  topicId: number | null;
+  scopeId: string;
   userId: string;
   data: string;
   callbackQueryId: string;
@@ -80,10 +94,12 @@ export class TelegramGateway extends EventEmitter {
   private running = false;
   private botKey: string;
   private botUsername: string | null = null;
+  private botUserId: number | null = null;
 
   constructor(
     private readonly botToken: string,
     private readonly allowedUserId: string,
+    private readonly allowedChatId: string | null,
     private readonly pollIntervalMs: number,
     private readonly store: BridgeStore,
     private readonly logger: Logger,
@@ -108,12 +124,22 @@ export class TelegramGateway extends EventEmitter {
     this.running = false;
   }
 
-  async sendMessage(chatId: string, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<number> {
-    return this.sendMessageWithOptions(chatId, text, inlineKeyboard);
+  async sendMessage(
+    chatId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+    messageThreadId?: number | null,
+  ): Promise<number> {
+    return this.sendMessageWithOptions(chatId, text, inlineKeyboard, undefined, messageThreadId);
   }
 
-  async sendHtmlMessage(chatId: string, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<number> {
-    return this.sendMessageWithOptions(chatId, text, inlineKeyboard, 'HTML');
+  async sendHtmlMessage(
+    chatId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+    messageThreadId?: number | null,
+  ): Promise<number> {
+    return this.sendMessageWithOptions(chatId, text, inlineKeyboard, 'HTML', messageThreadId);
   }
 
   async editMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
@@ -129,10 +155,12 @@ export class TelegramGateway extends EventEmitter {
     text: string,
     inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
     parseMode?: 'HTML',
+    messageThreadId?: number | null,
   ): Promise<number> {
     const result = await callTelegramApi<SendMessageResult>(this.botToken, 'sendMessage', {
       chat_id: chatId,
       text,
+      ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
       ...(inlineKeyboard ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {}),
       ...(parseMode ? { parse_mode: parseMode } : {}),
       disable_web_page_preview: true,
@@ -187,6 +215,14 @@ export class TelegramGateway extends EventEmitter {
     });
   }
 
+  async sendTypingInThread(chatId: string, messageThreadId?: number | null): Promise<void> {
+    await callTelegramApi(this.botToken, 'sendChatAction', {
+      chat_id: chatId,
+      ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      action: 'typing',
+    });
+  }
+
   async getFile(fileId: string): Promise<TelegramRemoteFile> {
     return getTelegramFile(this.botToken, fileId);
   }
@@ -199,6 +235,7 @@ export class TelegramGateway extends EventEmitter {
     const result = await callTelegramApi<GetMeResult>(this.botToken, 'getMe', {});
     if (result.ok && result.result) {
       this.botKey = `telegram:bot${result.result.id}`;
+      this.botUserId = result.result.id;
       this.botUsername = result.result.username ?? null;
     }
   }
@@ -243,17 +280,26 @@ export class TelegramGateway extends EventEmitter {
   }
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
-    if (update.message && update.message.from && update.message.chat.type === 'private') {
+    if (update.message && update.message.from && this.isAllowedChat(update.message.chat)) {
       if (String(update.message.from.id) !== this.allowedUserId) return;
       const attachments = extractAttachments(update.message);
       const text = update.message.text ?? update.message.caption ?? '';
+      const topicId = update.message.message_thread_id ?? null;
+      const scopeId = createTelegramScopeId(String(update.message.chat.id), topicId);
+      const entities = update.message.text ? (update.message.entities ?? []) : (update.message.caption_entities ?? []);
+      const replyToBot = this.botUserId !== null && update.message.reply_to_message?.from?.id === this.botUserId;
       if (text || attachments.length > 0) {
         this.emit('text', {
           chatId: String(update.message.chat.id),
+          topicId,
+          scopeId,
+          chatType: update.message.chat.type,
           userId: String(update.message.from.id),
           text,
           messageId: update.message.message_id,
           attachments,
+          entities,
+          replyToBot,
           ...(update.message.from.language_code ? { languageCode: update.message.from.language_code } : {}),
         } satisfies TelegramTextEvent);
         return;
@@ -262,8 +308,12 @@ export class TelegramGateway extends EventEmitter {
 
     if (update.callback_query?.data && update.callback_query.from && update.callback_query.message) {
       if (String(update.callback_query.from.id) !== this.allowedUserId) return;
+      if (!this.isAllowedChat(update.callback_query.message.chat)) return;
+      const topicId = update.callback_query.message.message_thread_id ?? null;
       this.emit('callback', {
         chatId: String(update.callback_query.message.chat.id),
+        topicId,
+        scopeId: createTelegramScopeId(String(update.callback_query.message.chat.id), topicId),
         userId: String(update.callback_query.from.id),
         data: update.callback_query.data,
         callbackQueryId: update.callback_query.id,
@@ -271,6 +321,13 @@ export class TelegramGateway extends EventEmitter {
         ...(update.callback_query.from.language_code ? { languageCode: update.callback_query.from.language_code } : {}),
       } satisfies TelegramCallbackEvent);
     }
+  }
+
+  private isAllowedChat(chat: TelegramChat): boolean {
+    if (this.allowedChatId) {
+      return String(chat.id) === this.allowedChatId;
+    }
+    return chat.type === 'private';
   }
 }
 

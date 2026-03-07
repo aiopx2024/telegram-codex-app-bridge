@@ -13,6 +13,8 @@ export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
 export interface AppConfig {
   tgBotToken: string;
   tgAllowedUserId: string;
+  tgAllowedChatId: string | null;
+  tgAllowedTopicId: number | null;
   codexCliBin: string;
   codexAppAutolaunch: boolean;
   codexAppLaunchCmd: string;
@@ -34,6 +36,8 @@ export function loadConfig(): AppConfig {
   const config: AppConfig = {
     tgBotToken: required('TG_BOT_TOKEN'),
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
+    tgAllowedChatId: optional('TG_ALLOWED_CHAT_ID'),
+    tgAllowedTopicId: nullableIntEnv('TG_ALLOWED_TOPIC_ID'),
     codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
     codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', true),
     codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || 'codex app',
@@ -72,11 +76,24 @@ function required(key: string): string {
   return value.trim();
 }
 
+function optional(key: string): string | null {
+  const value = process.env[key];
+  if (!value || !value.trim()) return null;
+  return value.trim();
+}
+
 function intEnv(key: string, fallback: number): number {
   const value = process.env[key];
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function nullableIntEnv(key: string): number | null {
+  const value = process.env[key];
+  if (!value || !value.trim()) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function boolEnv(key: string, fallback: boolean): boolean {
