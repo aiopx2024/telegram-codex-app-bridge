@@ -38,9 +38,22 @@ interface ResumeThreadOptions {
   threadId: string;
 }
 
+export interface TextTurnInput {
+  type: 'text';
+  text: string;
+  text_elements: [];
+}
+
+export interface LocalImageTurnInput {
+  type: 'localImage';
+  path: string;
+}
+
+export type TurnInput = TextTurnInput | LocalImageTurnInput;
+
 interface StartTurnOptions {
   threadId: string;
-  text: string;
+  input: TurnInput[];
   approvalPolicy: string;
   cwd: string | null;
   model: string | null;
@@ -151,7 +164,7 @@ export class CodexAppClient extends EventEmitter {
   async startTurn(options: StartTurnOptions): Promise<{ id: string; status: string }> {
     const result = await this.request('turn/start', {
       threadId: options.threadId,
-      input: [{ type: 'text', text: options.text, text_elements: [] }],
+      input: options.input,
       cwd: options.cwd,
       approvalPolicy: options.approvalPolicy,
       sandboxPolicy: null,

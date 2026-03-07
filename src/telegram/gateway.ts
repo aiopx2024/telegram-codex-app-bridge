@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
-import { callTelegramApi } from './api.js';
+import { callTelegramApi, downloadTelegramFile, getTelegramFile, type TelegramRemoteFile } from './api.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
 import { getTelegramCommands } from '../i18n.js';
+import type { TelegramInboundAttachment } from './media.js';
 
 interface TelegramUser {
   id: number;
@@ -24,6 +25,15 @@ interface TelegramMessage {
   chat: TelegramChat;
   from?: TelegramUser;
   text?: string;
+  caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
+  audio?: TelegramAudio;
+  voice?: TelegramVoice;
+  video?: TelegramVideo;
+  animation?: TelegramAnimation;
+  sticker?: TelegramSticker;
+  video_note?: TelegramVideoNote;
 }
 
 interface TelegramCallbackQuery {
@@ -53,6 +63,7 @@ export interface TelegramTextEvent {
   userId: string;
   text: string;
   messageId: number;
+  attachments: TelegramInboundAttachment[];
   languageCode?: string;
 }
 
@@ -176,6 +187,14 @@ export class TelegramGateway extends EventEmitter {
     });
   }
 
+  async getFile(fileId: string): Promise<TelegramRemoteFile> {
+    return getTelegramFile(this.botToken, fileId);
+  }
+
+  async downloadResolvedFile(remoteFilePath: string, destinationPath: string): Promise<number> {
+    return downloadTelegramFile(this.botToken, remoteFilePath, destinationPath);
+  }
+
   private async resolveBotIdentity(): Promise<void> {
     const result = await callTelegramApi<GetMeResult>(this.botToken, 'getMe', {});
     if (result.ok && result.result) {
@@ -186,7 +205,11 @@ export class TelegramGateway extends EventEmitter {
 
   private async registerCommands(): Promise<void> {
     await callTelegramApi(this.botToken, 'setMyCommands', {
+      commands: getTelegramCommands('zh'),
+    });
+    await callTelegramApi(this.botToken, 'setMyCommands', {
       commands: getTelegramCommands('en'),
+      language_code: 'en',
     });
     await callTelegramApi(this.botToken, 'setMyCommands', {
       commands: getTelegramCommands('zh'),
@@ -220,16 +243,21 @@ export class TelegramGateway extends EventEmitter {
   }
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
-    if (update.message?.text && update.message.from && update.message.chat.type === 'private') {
+    if (update.message && update.message.from && update.message.chat.type === 'private') {
       if (String(update.message.from.id) !== this.allowedUserId) return;
-      this.emit('text', {
-        chatId: String(update.message.chat.id),
-        userId: String(update.message.from.id),
-        text: update.message.text,
-        messageId: update.message.message_id,
-        ...(update.message.from.language_code ? { languageCode: update.message.from.language_code } : {}),
-      } satisfies TelegramTextEvent);
-      return;
+      const attachments = extractAttachments(update.message);
+      const text = update.message.text ?? update.message.caption ?? '';
+      if (text || attachments.length > 0) {
+        this.emit('text', {
+          chatId: String(update.message.chat.id),
+          userId: String(update.message.from.id),
+          text,
+          messageId: update.message.message_id,
+          attachments,
+          ...(update.message.from.language_code ? { languageCode: update.message.from.language_code } : {}),
+        } satisfies TelegramTextEvent);
+        return;
+      }
     }
 
     if (update.callback_query?.data && update.callback_query.from && update.callback_query.message) {
@@ -246,8 +274,228 @@ export class TelegramGateway extends EventEmitter {
   }
 }
 
+interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+interface TelegramDocument {
+  file_id: string;
+  file_unique_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramAudio {
+  file_id: string;
+  file_unique_id: string;
+  duration?: number;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramVoice {
+  file_id: string;
+  file_unique_id: string;
+  duration?: number;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramVideo {
+  file_id: string;
+  file_unique_id: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramAnimation {
+  file_id: string;
+  file_unique_id: string;
+  width?: number;
+  height?: number;
+  duration?: number;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramSticker {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  is_animated?: boolean;
+  is_video?: boolean;
+  file_size?: number;
+}
+
+interface TelegramVideoNote {
+  file_id: string;
+  file_unique_id: string;
+  length?: number;
+  duration?: number;
+  file_size?: number;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function extractAttachments(message: TelegramMessage): TelegramInboundAttachment[] {
+  const attachments: TelegramInboundAttachment[] = [];
+
+  const largestPhoto = pickLargestPhoto(message.photo ?? []);
+  if (largestPhoto) {
+    attachments.push({
+      kind: 'photo',
+      fileId: largestPhoto.file_id,
+      fileUniqueId: largestPhoto.file_unique_id,
+      fileName: null,
+      mimeType: 'image/jpeg',
+      fileSize: largestPhoto.file_size ?? null,
+      width: largestPhoto.width,
+      height: largestPhoto.height,
+      durationSeconds: null,
+      isAnimated: false,
+      isVideo: false,
+    });
+  }
+
+  if (message.document) {
+    attachments.push({
+      kind: 'document',
+      fileId: message.document.file_id,
+      fileUniqueId: message.document.file_unique_id,
+      fileName: message.document.file_name ?? null,
+      mimeType: message.document.mime_type ?? null,
+      fileSize: message.document.file_size ?? null,
+      width: null,
+      height: null,
+      durationSeconds: null,
+      isAnimated: false,
+      isVideo: false,
+    });
+  }
+
+  if (message.audio) {
+    attachments.push({
+      kind: 'audio',
+      fileId: message.audio.file_id,
+      fileUniqueId: message.audio.file_unique_id,
+      fileName: message.audio.file_name ?? null,
+      mimeType: message.audio.mime_type ?? null,
+      fileSize: message.audio.file_size ?? null,
+      width: null,
+      height: null,
+      durationSeconds: message.audio.duration ?? null,
+      isAnimated: false,
+      isVideo: false,
+    });
+  }
+
+  if (message.voice) {
+    attachments.push({
+      kind: 'voice',
+      fileId: message.voice.file_id,
+      fileUniqueId: message.voice.file_unique_id,
+      fileName: null,
+      mimeType: message.voice.mime_type ?? null,
+      fileSize: message.voice.file_size ?? null,
+      width: null,
+      height: null,
+      durationSeconds: message.voice.duration ?? null,
+      isAnimated: false,
+      isVideo: false,
+    });
+  }
+
+  if (message.video) {
+    attachments.push({
+      kind: 'video',
+      fileId: message.video.file_id,
+      fileUniqueId: message.video.file_unique_id,
+      fileName: message.video.file_name ?? null,
+      mimeType: message.video.mime_type ?? null,
+      fileSize: message.video.file_size ?? null,
+      width: message.video.width ?? null,
+      height: message.video.height ?? null,
+      durationSeconds: message.video.duration ?? null,
+      isAnimated: false,
+      isVideo: true,
+    });
+  }
+
+  if (message.animation) {
+    attachments.push({
+      kind: 'animation',
+      fileId: message.animation.file_id,
+      fileUniqueId: message.animation.file_unique_id,
+      fileName: message.animation.file_name ?? null,
+      mimeType: message.animation.mime_type ?? null,
+      fileSize: message.animation.file_size ?? null,
+      width: message.animation.width ?? null,
+      height: message.animation.height ?? null,
+      durationSeconds: message.animation.duration ?? null,
+      isAnimated: true,
+      isVideo: message.animation.mime_type?.startsWith('video/') ?? false,
+    });
+  }
+
+  if (message.sticker) {
+    attachments.push({
+      kind: 'sticker',
+      fileId: message.sticker.file_id,
+      fileUniqueId: message.sticker.file_unique_id,
+      fileName: null,
+      mimeType: null,
+      fileSize: message.sticker.file_size ?? null,
+      width: message.sticker.width,
+      height: message.sticker.height,
+      durationSeconds: null,
+      isAnimated: message.sticker.is_animated ?? false,
+      isVideo: message.sticker.is_video ?? false,
+    });
+  }
+
+  if (message.video_note) {
+    attachments.push({
+      kind: 'videoNote',
+      fileId: message.video_note.file_id,
+      fileUniqueId: message.video_note.file_unique_id,
+      fileName: null,
+      mimeType: 'video/mp4',
+      fileSize: message.video_note.file_size ?? null,
+      width: message.video_note.length ?? null,
+      height: message.video_note.length ?? null,
+      durationSeconds: message.video_note.duration ?? null,
+      isAnimated: false,
+      isVideo: true,
+    });
+  }
+
+  return attachments;
+}
+
+function pickLargestPhoto(photos: TelegramPhotoSize[]): TelegramPhotoSize | null {
+  if (photos.length === 0) return null;
+  return photos.reduce((current, candidate) => {
+    const currentArea = current.width * current.height;
+    const candidateArea = candidate.width * candidate.height;
+    if (candidateArea !== currentArea) {
+      return candidateArea > currentArea ? candidate : current;
+    }
+    return (candidate.file_size ?? 0) > (current.file_size ?? 0) ? candidate : current;
+  });
 }
 
 function toErrorMeta(error: unknown): Record<string, unknown> {

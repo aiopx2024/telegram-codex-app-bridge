@@ -5,3 +5,5 @@ dist/
 coverage/
 *.log
 .runtime/
+.telegram-inbox/
+tmp/

@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
@@ -17,8 +19,17 @@ import {
   resolveRequestedModel,
 } from './presentation.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
+import {
+  TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES,
+  buildAttachmentPrompt,
+  isNativeImageAttachment,
+  planAttachmentStoragePath,
+  summarizeTelegramInput,
+  type StagedTelegramAttachment,
+  type TelegramInboundAttachment,
+} from '../telegram/media.js';
 import { chunkTelegramMessage, sanitizeTelegramPreview } from '../telegram/text.js';
-import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest } from '../codex_app/client.js';
+import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
 import { writeRuntimeStatus } from '../runtime.js';
 
 interface ActiveTurn {
@@ -34,6 +45,7 @@ interface ActiveTurn {
 }
 
 type ApprovalAction = 'accept' | 'session' | 'deny';
+class UserFacingError extends Error {}
 
 export class BridgeController {
   private activeTurns = new Map<string, ActiveTurn>();
@@ -114,9 +126,9 @@ export class BridgeController {
 
   private async handleText(event: TelegramTextEvent): Promise<void> {
     const locale = this.localeForChat(event.chatId, event.languageCode);
-    this.store.insertAudit('inbound', event.chatId, 'telegram.message', event.text);
-    const command = parseCommand(event.text);
-    if (command) {
+    this.store.insertAudit('inbound', event.chatId, 'telegram.message', summarizeTelegramInput(event.text, event.attachments));
+    const command = event.attachments.length === 0 ? parseCommand(event.text) : null;
+    if (command && event.text.trim()) {
       await this.handleCommand(event, locale, command.name, command.args);
       return;
     }
@@ -132,7 +144,8 @@ export class BridgeController {
       : await this.createBinding(event.chatId, null);
     await this.bot.sendTyping(event.chatId);
     const previewMessageId = await this.bot.sendMessage(event.chatId, t(locale, 'working'));
-    const turnState = await this.startTurnWithRecovery(event.chatId, binding, event.text);
+    const input = await this.buildTurnInput(binding, event, locale);
+    const turnState = await this.startTurnWithRecovery(event.chatId, binding, input);
     await this.registerActiveTurn(event.chatId, turnState.threadId, turnState.turnId, previewMessageId);
   }
 
@@ -455,12 +468,12 @@ export class BridgeController {
     return this.storeThreadSession(chatId, session, 'seed');
   }
 
-  private async startTurnWithRecovery(chatId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, text: string): Promise<{ threadId: string; turnId: string }> {
+  private async startTurnWithRecovery(chatId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, input: TurnInput[]): Promise<{ threadId: string; turnId: string }> {
     const settings = this.store.getChatSettings(chatId);
     try {
       const turn = await this.app.startTurn({
         threadId: binding.threadId,
-        text,
+        input,
         approvalPolicy: this.config.defaultApprovalPolicy,
         cwd: binding.cwd ?? this.config.defaultCwd,
         model: settings?.model ?? null,
@@ -477,7 +490,7 @@ export class BridgeController {
       const nextSettings = this.store.getChatSettings(chatId);
       const turn = await this.app.startTurn({
         threadId: replacement.threadId,
-        text,
+        input,
         approvalPolicy: this.config.defaultApprovalPolicy,
         cwd: replacement.cwd ?? this.config.defaultCwd,
         model: nextSettings?.model ?? null,
@@ -485,6 +498,85 @@ export class BridgeController {
       });
       return { threadId: replacement.threadId, turnId: turn.id };
     }
+  }
+
+  private async buildTurnInput(
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+    event: TelegramTextEvent,
+    locale: AppLocale,
+  ): Promise<TurnInput[]> {
+    if (event.attachments.length === 0) {
+      return [{
+        type: 'text',
+        text: event.text,
+        text_elements: [],
+      }];
+    }
+
+    const cwd = binding.cwd ?? this.config.defaultCwd;
+    const stagedAttachments = await this.stageAttachments(cwd, binding.threadId, event.attachments, locale);
+    const prompt = buildAttachmentPrompt(event.text, stagedAttachments);
+    const input: TurnInput[] = [{
+      type: 'text',
+      text: prompt,
+      text_elements: [],
+    }];
+    for (const attachment of stagedAttachments) {
+      if (!attachment.nativeImage) continue;
+      input.push({
+        type: 'localImage',
+        path: attachment.localPath,
+      });
+    }
+    return input;
+  }
+
+  private async stageAttachments(
+    cwd: string,
+    threadId: string,
+    attachments: readonly TelegramInboundAttachment[],
+    locale: AppLocale,
+  ): Promise<StagedTelegramAttachment[]> {
+    const staged: StagedTelegramAttachment[] = [];
+    for (const attachment of attachments) {
+      try {
+        const remoteFile = await this.bot.getFile(attachment.fileId);
+        const resolvedSize = attachment.fileSize ?? remoteFile.file_size ?? null;
+        if (resolvedSize !== null && resolvedSize > TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES) {
+          throw new UserFacingError(t(locale, 'attachment_too_large', {
+            name: attachment.fileName ?? attachment.fileUniqueId,
+            size: resolvedSize,
+          }));
+        }
+        if (!remoteFile.file_path) {
+          throw new Error('Telegram file path is missing');
+        }
+        const planned = planAttachmentStoragePath(cwd, threadId, attachment, remoteFile.file_path);
+        await fs.mkdir(path.dirname(planned.localPath), { recursive: true });
+        await this.bot.downloadResolvedFile(remoteFile.file_path, planned.localPath);
+        const resolvedAttachment: TelegramInboundAttachment = {
+          ...attachment,
+          fileName: planned.fileName,
+          fileSize: resolvedSize,
+        };
+        staged.push({
+          ...resolvedAttachment,
+          fileName: planned.fileName,
+          localPath: planned.localPath,
+          relativePath: planned.relativePath,
+          nativeImage: isNativeImageAttachment(resolvedAttachment),
+        });
+      } catch (error) {
+        if (error instanceof UserFacingError) {
+          throw error;
+        }
+        throw new Error(t(locale, 'attachment_download_failed', {
+          name: attachment.fileName ?? attachment.fileUniqueId,
+          error: formatUserError(error),
+        }));
+      }
+    }
+    return staged;
   }
 
   private async registerActiveTurn(chatId: string, threadId: string, turnId: string, previewMessageId: number): Promise<void> {
