@@ -138,7 +138,7 @@ export class CodexAppClient extends EventEmitter {
       developerInstructions: null,
       personality: null,
       ephemeral: null,
-      experimentalRawEvents: false,
+      experimentalRawEvents: true,
       persistExtendedHistory: false,
     });
     return mapThreadSessionState(result);
@@ -156,6 +156,7 @@ export class CodexAppClient extends EventEmitter {
       model: null,
       modelProvider: null,
       personality: null,
+      experimentalRawEvents: true,
       persistExtendedHistory: false,
     });
     return mapThreadSessionState(result);
