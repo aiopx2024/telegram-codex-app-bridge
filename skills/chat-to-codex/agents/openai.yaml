@@ -1,4 +1,4 @@
 interface:
-  display_name: "Mobile to Codex"
-  short_description: "Deploy Codex chat bridges to Mac hosts"
-  default_prompt: "Use $chat-to-codex to install and configure a Codex bridge on this Mac or over SSH."
+  display_name: "Telegram to Codex"
+  short_description: "Install, configure, and validate Telegram Codex bridges"
+  default_prompt: "Use $chat-to-codex to clone the bridge repo, collect Telegram values, write .env, start the service, and verify it with a first Telegram message."

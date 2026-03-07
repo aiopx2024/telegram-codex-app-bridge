@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tg-allowed-chat-id")
     parser.add_argument("--tg-allowed-topic-id")
     parser.add_argument("--code-approval-policy", default="on-request")
+    parser.add_argument("--default-sandbox-mode", default="workspace-write")
     parser.add_argument("--node-major", type=int, default=24)
     parser.add_argument("--no-start", action="store_true")
     return parser.parse_args()
@@ -40,6 +41,7 @@ def main() -> None:
         "tg_allowed_chat_id": args.tg_allowed_chat_id,
         "tg_allowed_topic_id": args.tg_allowed_topic_id,
         "code_approval_policy": args.code_approval_policy,
+        "default_sandbox_mode": args.default_sandbox_mode,
         "node_major": args.node_major,
         "no_start": args.no_start,
     }

@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tg-allowed-chat-id")
     parser.add_argument("--tg-allowed-topic-id")
     parser.add_argument("--code-approval-policy")
+    parser.add_argument("--default-sandbox-mode")
     parser.add_argument("--node-major", type=int)
     parser.add_argument("--no-start", action="store_const", const=True, default=None)
     return parser.parse_args()
@@ -46,6 +47,7 @@ def merged_config(args: argparse.Namespace) -> dict:
         "tg_allowed_chat_id": None,
         "tg_allowed_topic_id": None,
         "code_approval_policy": "on-request",
+        "default_sandbox_mode": "workspace-write",
         "node_major": NODE_MAJOR_DEFAULT,
         "no_start": False,
     }
@@ -62,6 +64,7 @@ def merged_config(args: argparse.Namespace) -> dict:
         "tg_allowed_chat_id": args.tg_allowed_chat_id,
         "tg_allowed_topic_id": args.tg_allowed_topic_id,
         "code_approval_policy": args.code_approval_policy,
+        "default_sandbox_mode": args.default_sandbox_mode,
         "node_major": args.node_major,
         "no_start": args.no_start,
     }
@@ -261,6 +264,7 @@ def write_env_file(config: dict, codex_bin: str) -> str:
         "LOG_LEVEL=info",
         f"DEFAULT_CWD={config['default_cwd']}",
         f"DEFAULT_APPROVAL_POLICY={config['code_approval_policy']}",
+        f"DEFAULT_SANDBOX_MODE={config['default_sandbox_mode']}",
         "TELEGRAM_POLL_INTERVAL_MS=1200",
         "TELEGRAM_PREVIEW_THROTTLE_MS=800",
         "THREAD_LIST_LIMIT=10",
