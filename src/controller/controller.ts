@@ -6,7 +6,6 @@ import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type {
-  AccessPresetValue,
   AppLocale,
   ModelInfo,
   PendingApprovalRecord,

@@ -32,10 +32,14 @@ function acquireProcessLockInternal(lockPath: string, allowStaleRetry: boolean):
         released = true;
         try {
           fs.closeSync(fd);
-        } catch {}
+        } catch {
+          // Best effort: the descriptor may already be closed during shutdown.
+        }
         try {
           fs.rmSync(lockPath, { force: true });
-        } catch {}
+        } catch {
+          // Best effort: lock cleanup should not fail release.
+        }
       },
     };
   } catch (error) {
