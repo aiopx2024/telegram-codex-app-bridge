@@ -18,6 +18,7 @@ test('linux service scripts manage the systemd user lifecycle through the unifie
   const fakeConfigHome = path.join(tempDir, '.config');
   const systemctlLog = path.join(tempDir, 'systemctl.log');
   const journalctlLog = path.join(tempDir, 'journalctl.log');
+  const realUname = spawnSync('sh', ['-c', 'command -v uname'], { encoding: 'utf8' }).stdout.trim() || '/usr/bin/uname';
   const distDir = path.join(rootDir, 'dist');
   const distMainPath = path.join(distDir, 'main.js');
   const distMainExisted = fs.existsSync(distMainPath);
@@ -42,6 +43,14 @@ exit 0
 printf '%s\n' "$*" >> "${journalctlLog}"
 echo "fake journal log"
 exit 0
+`);
+
+  writeExecutable(path.join(fakeBin, 'uname'), `#!/bin/sh
+if [ "\${1:-}" = "-s" ]; then
+  echo "Linux"
+  exit 0
+fi
+exec "${realUname}" "$@"
 `);
 
   const env = {
