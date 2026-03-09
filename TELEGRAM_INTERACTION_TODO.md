@@ -1,5 +1,10 @@
 # Telegram x Codex Interaction Redesign TODO
 
+Next-phase guided plan work now lives in:
+
+- `GUIDED_PLAN_ARCHITECTURE.md`
+- `GUIDED_PLAN_TODO.md`
+
 ## Goal
 
 Make the Telegram bridge feel as close to Codex App as possible while supporting both `private chat` and `topic` usage.

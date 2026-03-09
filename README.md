@@ -10,9 +10,13 @@ Use a Telegram bot to control a local Codex host through `codex app-server`.
 - Chat-scoped model and reasoning-effort control with `/models` and optional `/model`/`/effort` aliases
 - Chat-scoped conversation mode control with `/mode` and optional `/plan` alias
 - Chat-scoped access presets with `/permissions` and optional `/access` alias
+- Unified `/settings` home for model, mode, access, queue, and plan-history controls
 - Deep-link sync into the local Codex desktop host with `/open` and `/reveal` when the host supports it
-- Inline approval buttons for command and file-change approvals
-- Interactive `request_user_input` flow with button-first plan clarifications, recommended first choices, and optional custom answers
+- Guided plan sessions with a mandatory confirm-or-revise gate before execution in `plan` mode
+- Plan streaming with a single live plan card, version tracking, and restart-safe recovery prompts
+- Inline approval cards with summary, risk level, and detail/back views for command and file-change approvals
+- Interactive `request_user_input` flow with button-first choices, recommended-first options, review/back/cancel controls, and optional custom answers
+- FIFO follow-up queue with `/queue`, automatic resume, and startup recovery for interrupted queued items
 - SQLite persistence for bindings, offsets, approvals, and audit logs
 - Stable segmented live rendering across private chat and topic/group modes
 - Bottom activity cards for `thinking`, `browsing`, `approval`, `interrupt`, and tool summaries
@@ -57,7 +61,24 @@ After install, use:
 ```bash
 ./scripts/service/status.sh
 ./scripts/service/logs.sh
+./scripts/service/restart-safe.sh
 ```
+
+`restart-safe.sh` runs build + restart in sequence, waits until runtime status reports `running=true` and `connected=true`, then sends a Telegram callback message (success/failure with timestamp, commit, and pid).
+
+Useful environment overrides:
+
+```bash
+BUILD_BEFORE_RESTART=false ./scripts/service/restart-safe.sh
+RESTART_TIMEOUT_SEC=180 RESTART_POLL_SEC=3 ./scripts/service/restart-safe.sh
+NOTIFY_TELEGRAM=false ./scripts/service/restart-safe.sh
+NOTIFY_TARGET=group ./scripts/service/restart-safe.sh
+NOTIFY_CHAT_ID=123456789 ./scripts/service/restart-safe.sh
+DETACH=true BUILD_BEFORE_RESTART=false ./scripts/service/restart-safe.sh
+```
+
+`DETACH=true` launches a transient user-systemd job (`systemd-run --user`) so restart completion and Telegram callbacks still happen even if the current terminal/chat session is interrupted.
+`NOTIFY_TARGET` defaults to `private` (callback to `TG_ALLOWED_USER_ID` direct chat).
 
 ## Codex Skill
 
@@ -140,6 +161,8 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/new [cwd]`
 - `/models` opens the model and reasoning picker
 - `/mode` opens the conversation-mode picker (`default`, `plan`)
+- `/settings` opens the unified settings home
+- `/queue [next|clear]` shows or trims queued follow-up messages
 - `/permissions` opens the access preset picker (`read-only`, `default`, `full-access`)
 - `/model` and `/effort` are compatibility aliases for the same picker
 - `/plan` is a compatibility alias for switching to plan mode
@@ -148,6 +171,21 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/where`
 - `/interrupt`
 - Plain text sends to the current thread, or creates a new one if none is bound.
+- When a turn is already running and auto-queue is enabled, the new message is normalized, queued, and resumed automatically in FIFO order.
+
+## Guided Plan Flow
+
+When a chat is in `plan` mode, the bridge intentionally adds one layer on top of raw Codex plan mode:
+
+1. The first turn is draft-only. Codex can inspect context and build a plan, but the bridge blocks execution until you confirm.
+2. Telegram keeps one plan card updated as `item/plan/delta` and `turn/plan/updated` arrive.
+3. Once the draft is stable, you get `Continue (Recommended)`, `Revise`, and `Cancel`.
+4. After confirmation, Codex can execute and ask focused follow-up questions with 2-3 options, a recommended first choice, and a review/back/cancel step before submit.
+5. If the bridge restarts, recovery cards restore pending plan confirmation, approvals, input prompts, and queued follow-ups.
+
+This is the closest approximation of Codex App that fits Telegram's linear chat surface.
+
+Resolved guided-plan history is retained conservatively: the bridge keeps up to the 20 most recent resolved plan sessions per chat and prunes resolved records older than 30 days during startup. If `Persist plan history` is turned off in `/settings`, resolved plan sessions for that chat are dropped on the next startup cleanup pass.
 
 ## Telegram Group Checklist
 
@@ -184,14 +222,16 @@ What is intentionally supported now:
 - Private chats and topics use segmented live messages so visible partial output is not overwritten by generic status text
 - Group topics use segmented messages, activity cards, and archived tool summaries
 - Tool actions such as `Read ...`, `Searched for ...`, `Ran ...`, and edit operations are summarized separately from the assistant body
-- Plan mode can render plan updates and pause on interactive questions until you answer in Telegram
+- Guided plan mode can hold execution behind a confirm/revise gate, render live plan updates, pause on interactive questions, and resume after restart
+- Follow-up messages can queue behind an active turn instead of being dropped
+- Approval cards can expand into a detail view with risk and path summaries
 - Interrupt and approval states are shown as their own activity states instead of being mixed into generic "working" text
 
 What still remains an approximation of Codex App:
 
 - Telegram does not give this bridge the same native multi-panel surface as Codex App, so activity and body still share one linear chat timeline
 - If Telegram or the network briefly fails, the bridge retries rendering, but the UI can still be less fluid than Codex App
-- A bridge restart can retire stale live cards and preserve thread context, but it cannot reconstruct every in-flight delta exactly
+- A bridge restart can recover pending plan/input/approval state, but it still cannot reconstruct every in-flight text delta exactly
 
 ## Finding Chat And Topic IDs
 
