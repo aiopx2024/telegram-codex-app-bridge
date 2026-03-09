@@ -80,6 +80,9 @@ test('BridgeStore caches thread lists and pending approvals', () => {
       reason: 'Needs confirmation',
       command: 'rm -rf build',
       cwd: '/repo/a',
+      summary: 'Delete build output',
+      riskLevel: 'high',
+      details: { commandPreview: 'rm -rf build' },
       messageId: null,
       createdAt: 123,
       resolvedAt: null,
@@ -87,7 +90,25 @@ test('BridgeStore caches thread lists and pending approvals', () => {
 
     assert.equal(store.countPendingApprovals(), 1);
     store.updatePendingApprovalMessage('approval-1', 99);
-    assert.equal(store.getPendingApproval('approval-1')?.messageId, 99);
+    assert.deepEqual(store.getPendingApproval('approval-1'), {
+      localId: 'approval-1',
+      serverRequestId: '42',
+      kind: 'command',
+      chatId: 'chat-2',
+      threadId: 'thread-a',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      approvalId: null,
+      reason: 'Needs confirmation',
+      command: 'rm -rf build',
+      cwd: '/repo/a',
+      summary: 'Delete build output',
+      riskLevel: 'high',
+      details: { commandPreview: 'rm -rf build' },
+      messageId: 99,
+      createdAt: 123,
+      resolvedAt: null,
+    });
     store.markApprovalResolved('approval-1');
     assert.ok(store.getPendingApproval('approval-1')?.resolvedAt !== null);
     assert.equal(store.countPendingApprovals(), 0);
@@ -171,6 +192,9 @@ test('BridgeStore persists chat session settings', () => {
       locale: null,
       accessPreset: null,
       collaborationMode: null,
+      confirmPlanBeforeExecute: true,
+      autoQueueMessages: true,
+      persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
 
@@ -182,6 +206,9 @@ test('BridgeStore persists chat session settings', () => {
       locale: null,
       accessPreset: null,
       collaborationMode: null,
+      confirmPlanBeforeExecute: true,
+      autoQueueMessages: true,
+      persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
 
@@ -193,6 +220,9 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: null,
       collaborationMode: null,
+      confirmPlanBeforeExecute: true,
+      autoQueueMessages: true,
+      persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
 
@@ -204,6 +234,9 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: null,
+      confirmPlanBeforeExecute: true,
+      autoQueueMessages: true,
+      persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
 
@@ -215,6 +248,26 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      confirmPlanBeforeExecute: true,
+      autoQueueMessages: true,
+      persistPlanHistory: true,
+      updatedAt: store.getChatSettings('chat-3')!.updatedAt,
+    });
+
+    store.setChatGuidedPlanPreferences('chat-3', {
+      confirmPlanBeforeExecute: false,
+      autoQueueMessages: false,
+    });
+    assert.deepEqual(store.getChatSettings('chat-3'), {
+      chatId: 'chat-3',
+      model: null,
+      reasoningEffort: 'medium',
+      locale: 'zh',
+      accessPreset: 'full-access',
+      collaborationMode: 'plan',
+      confirmPlanBeforeExecute: false,
+      autoQueueMessages: false,
+      persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
 
@@ -226,8 +279,130 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      confirmPlanBeforeExecute: false,
+      autoQueueMessages: false,
+      persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
+  });
+});
+
+test('BridgeStore persists guided plan sessions, snapshots, queue, and prompt message history', () => {
+  withStore((store) => {
+    store.savePlanSession({
+      sessionId: 'session-1',
+      chatId: 'chat-5',
+      threadId: 'thread-guided',
+      sourceTurnId: 'turn-plan',
+      executionTurnId: null,
+      state: 'awaiting_plan_confirmation',
+      confirmationRequired: true,
+      confirmedPlanVersion: null,
+      latestPlanVersion: 2,
+      currentPromptId: null,
+      currentApprovalId: null,
+      queueDepth: 1,
+      lastPlanMessageId: 12,
+      lastPromptMessageId: null,
+      lastApprovalMessageId: null,
+      createdAt: 1000,
+      updatedAt: 1001,
+      resolvedAt: null,
+    });
+
+    store.savePlanSnapshot({
+      sessionId: 'session-1',
+      version: 1,
+      sourceEvent: 'turn/plan/updated',
+      explanation: 'First draft',
+      steps: [
+        { step: 'Inspect the repo', status: 'completed' },
+        { step: 'Confirm the plan', status: 'pending' },
+      ],
+      createdAt: 1002,
+    });
+
+    store.saveQueuedTurnInput({
+      queueId: 'queue-1',
+      scopeId: 'chat-5::root',
+      chatId: 'chat-5',
+      threadId: 'thread-guided',
+      input: [{ type: 'text', text: 'follow up' }],
+      sourceSummary: 'follow up',
+      telegramMessageId: 55,
+      status: 'queued',
+      createdAt: 1003,
+      updatedAt: 1003,
+    });
+
+    store.savePendingUserInputMessage({
+      inputLocalId: 'input-1',
+      questionIndex: 0,
+      messageId: 77,
+      messageKind: 'question',
+      createdAt: 1004,
+    });
+
+    assert.deepEqual(store.getPlanSession('session-1'), {
+      sessionId: 'session-1',
+      chatId: 'chat-5',
+      threadId: 'thread-guided',
+      sourceTurnId: 'turn-plan',
+      executionTurnId: null,
+      state: 'awaiting_plan_confirmation',
+      confirmationRequired: true,
+      confirmedPlanVersion: null,
+      latestPlanVersion: 2,
+      currentPromptId: null,
+      currentApprovalId: null,
+      queueDepth: 1,
+      lastPlanMessageId: 12,
+      lastPromptMessageId: null,
+      lastApprovalMessageId: null,
+      createdAt: 1000,
+      updatedAt: 1001,
+      resolvedAt: null,
+    });
+    assert.equal(store.listOpenPlanSessions('chat-5').length, 1);
+    assert.deepEqual(store.listPlanSnapshots('session-1'), [{
+      sessionId: 'session-1',
+      version: 1,
+      sourceEvent: 'turn/plan/updated',
+      explanation: 'First draft',
+      steps: [
+        { step: 'Inspect the repo', status: 'completed' },
+        { step: 'Confirm the plan', status: 'pending' },
+      ],
+      createdAt: 1002,
+    }]);
+    assert.deepEqual(store.peekQueuedTurnInput('chat-5::root'), {
+      queueId: 'queue-1',
+      scopeId: 'chat-5::root',
+      chatId: 'chat-5',
+      threadId: 'thread-guided',
+      input: [{ type: 'text', text: 'follow up' }],
+      sourceSummary: 'follow up',
+      telegramMessageId: 55,
+      status: 'queued',
+      createdAt: 1003,
+      updatedAt: 1003,
+    });
+    assert.equal(store.countQueuedTurnInputs('chat-5::root'), 1);
+    assert.deepEqual(store.listPendingUserInputMessages('input-1'), [{
+      inputLocalId: 'input-1',
+      questionIndex: 0,
+      messageId: 77,
+      messageKind: 'question',
+      createdAt: 1004,
+    }]);
+
+    store.updateQueuedTurnInputStatus('queue-1', 'processing');
+    assert.equal(store.getQueuedTurnInput('queue-1')?.status, 'processing');
+    assert.equal(store.countQueuedTurnInputs('chat-5::root'), 0);
+
+    store.updatePlanSessionState('session-1', 'completed', 1005);
+    assert.equal(store.getPlanSession('session-1')?.state, 'completed');
+    assert.equal(store.getPlanSession('session-1')?.resolvedAt, 1005);
   });
 });
 
@@ -265,5 +440,183 @@ test('BridgeStore persists active turn preview cleanup state', () => {
 
     store.removeActiveTurnPreviewByMessage('chat-4::root', 42);
     assert.deepEqual(store.listActiveTurnPreviews(), []);
+  });
+});
+
+test('BridgeStore cleans up resolved history and respects plan history settings', () => {
+  withStore((store) => {
+    const now = Date.now();
+    const recent = now - (1000 * 60 * 60 * 24 * 2);
+    const expired = now - (1000 * 60 * 60 * 24 * 45);
+
+    store.setChatSettings('chat-keep', 'gpt-5', 'medium', 'en');
+    store.setChatSettings('chat-drop', 'gpt-5', 'medium', 'en');
+    store.setChatGuidedPlanPreferences('chat-drop', { persistPlanHistory: false });
+
+    const saveResolvedSession = (sessionId: string, chatId: string, resolvedAt: number) => {
+      store.savePlanSession({
+        sessionId,
+        chatId,
+        threadId: `thread-${chatId}`,
+        sourceTurnId: `turn-${sessionId}`,
+        executionTurnId: `exec-${sessionId}`,
+        state: 'completed',
+        confirmationRequired: true,
+        confirmedPlanVersion: 1,
+        latestPlanVersion: 1,
+        currentPromptId: null,
+        currentApprovalId: null,
+        queueDepth: 0,
+        lastPlanMessageId: null,
+        lastPromptMessageId: null,
+        lastApprovalMessageId: null,
+        createdAt: resolvedAt - 100,
+        updatedAt: resolvedAt,
+        resolvedAt,
+      });
+      store.savePlanSnapshot({
+        sessionId,
+        version: 1,
+        sourceEvent: 'turn/plan/updated',
+        explanation: `Snapshot for ${sessionId}`,
+        steps: [{ step: 'Do the work', status: 'completed' }],
+        createdAt: resolvedAt - 50,
+      });
+    };
+
+    saveResolvedSession('session-keep-new', 'chat-keep', recent);
+    saveResolvedSession('session-keep-old', 'chat-keep', recent - 1000);
+    saveResolvedSession('session-expired', 'chat-keep', expired);
+    saveResolvedSession('session-drop', 'chat-drop', recent);
+
+    store.savePendingApproval({
+      localId: 'approval-old',
+      serverRequestId: 'approval-request-old',
+      kind: 'command',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      turnId: 'turn-approval-old',
+      itemId: 'item-approval-old',
+      approvalId: null,
+      reason: 'Old approval',
+      command: 'rm -rf dist',
+      cwd: '/repo',
+      summary: 'Delete dist',
+      riskLevel: 'high',
+      details: null,
+      messageId: null,
+      createdAt: expired - 100,
+      resolvedAt: expired,
+    });
+    store.savePendingApproval({
+      localId: 'approval-open',
+      serverRequestId: 'approval-request-open',
+      kind: 'command',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      turnId: 'turn-approval-open',
+      itemId: 'item-approval-open',
+      approvalId: null,
+      reason: 'Open approval',
+      command: 'npm test',
+      cwd: '/repo',
+      summary: 'Run tests',
+      riskLevel: 'low',
+      details: null,
+      messageId: null,
+      createdAt: recent,
+      resolvedAt: null,
+    });
+
+    store.savePendingUserInput({
+      localId: 'input-old',
+      serverRequestId: 'request-old',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      turnId: 'turn-input-old',
+      itemId: 'item-input-old',
+      messageId: null,
+      questions: [],
+      answers: {},
+      currentQuestionIndex: 0,
+      awaitingFreeText: false,
+      createdAt: expired - 100,
+      resolvedAt: expired,
+    });
+    store.savePendingUserInputMessage({
+      inputLocalId: 'input-old',
+      questionIndex: 0,
+      messageId: 900,
+      messageKind: 'resolved',
+      createdAt: expired,
+    });
+    store.savePendingUserInput({
+      localId: 'input-open',
+      serverRequestId: 'request-open',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      turnId: 'turn-input-open',
+      itemId: 'item-input-open',
+      messageId: null,
+      questions: [],
+      answers: {},
+      currentQuestionIndex: 0,
+      awaitingFreeText: false,
+      createdAt: recent,
+      resolvedAt: null,
+    });
+
+    store.saveQueuedTurnInput({
+      queueId: 'queue-old',
+      scopeId: 'chat-keep',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      input: [{ type: 'text', text: 'Old follow up' }],
+      sourceSummary: 'Old follow up',
+      telegramMessageId: null,
+      status: 'completed',
+      createdAt: expired - 100,
+      updatedAt: expired,
+    });
+    store.saveQueuedTurnInput({
+      queueId: 'queue-live',
+      scopeId: 'chat-keep',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      input: [{ type: 'text', text: 'Live follow up' }],
+      sourceSummary: 'Live follow up',
+      telegramMessageId: null,
+      status: 'queued',
+      createdAt: recent,
+      updatedAt: recent,
+    });
+
+    const result = store.cleanupHistoricalRecords({
+      maxResolvedAgeMs: 1000 * 60 * 60 * 24 * 30,
+      maxResolvedPlanSessionsPerChat: 1,
+    });
+
+    assert.deepEqual(result, {
+      deletedPlanSessions: 3,
+      deletedPlanSnapshots: 3,
+      deletedPendingApprovals: 1,
+      deletedPendingUserInputs: 1,
+      deletedPendingUserInputMessages: 1,
+      deletedQueuedTurnInputs: 1,
+    });
+
+    assert.ok(store.getPlanSession('session-keep-new'));
+    assert.equal(store.getPlanSession('session-keep-old'), null);
+    assert.equal(store.getPlanSession('session-expired'), null);
+    assert.equal(store.getPlanSession('session-drop'), null);
+    assert.equal(store.listPlanSnapshots('session-keep-new').length, 1);
+    assert.equal(store.listPlanSnapshots('session-keep-old').length, 0);
+    assert.equal(store.getPendingApproval('approval-old'), null);
+    assert.equal(store.getPendingApproval('approval-open')?.resolvedAt, null);
+    assert.equal(store.getPendingUserInput('input-old'), null);
+    assert.deepEqual(store.listPendingUserInputMessages('input-old'), []);
+    assert.equal(store.getPendingUserInput('input-open')?.resolvedAt, null);
+    assert.equal(store.getQueuedTurnInput('queue-old'), null);
+    assert.equal(store.getQueuedTurnInput('queue-live')?.status, 'queued');
   });
 });
