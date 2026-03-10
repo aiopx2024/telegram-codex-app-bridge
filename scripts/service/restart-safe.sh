@@ -11,11 +11,12 @@ RESTART_TIMEOUT_SEC="${RESTART_TIMEOUT_SEC:-90}"
 RESTART_POLL_SEC="${RESTART_POLL_SEC:-2}"
 ENV_FILE="${ENV_FILE:-${ROOT_DIR}/.env}"
 STATUS_FILE="${STATUS_FILE:-${APP_HOME}/runtime/status.json}"
-DETACH="${DETACH:-false}"
+DETACH="${DETACH:-auto}"
 START_NOTIFY="${START_NOTIFY:-true}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM}"
 SAFE_RESTART_UNIT_PREFIX="${SAFE_RESTART_UNIT_PREFIX:-com.ganxing.telegram-codex-app-bridge.safe-restart}"
 NOTIFY_TARGET="${NOTIFY_TARGET:-auto}"
+SAFE_RESTART_CGROUP_FILE="${SAFE_RESTART_CGROUP_FILE:-/proc/$$/cgroup}"
 
 latest_notify_scope_cache="__unset__"
 
@@ -222,11 +223,46 @@ notify_telegram() {
   return 0
 }
 
+running_inside_bridge_service_cgroup() {
+  if [[ "$(platform_name)" != "linux" ]]; then
+    return 1
+  fi
+  if [[ ! -r "$SAFE_RESTART_CGROUP_FILE" ]]; then
+    return 1
+  fi
+  grep -Fq "/${SYSTEMD_UNIT_NAME}" "$SAFE_RESTART_CGROUP_FILE"
+}
+
+should_auto_detach() {
+  if [[ "$DETACH" != "auto" ]]; then
+    return 1
+  fi
+  if ! command -v systemd-run >/dev/null 2>&1; then
+    return 1
+  fi
+  running_inside_bridge_service_cgroup
+}
+
+emit_restart_started() {
+  local branch="$1"
+  local commit="$2"
+  local now_iso start_msg
+  now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  start_msg=$'[bridge] restart started\n'
+  start_msg+="time: ${now_iso}"$'\n'
+  start_msg+="run_id: ${RUN_ID}"$'\n'
+  start_msg+="commit: ${branch}@${commit}"
+  echo "$start_msg"
+  notify_telegram "$start_msg"
+}
+
 run_id_for_unit() {
   printf '%s' "$RUN_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9.-]/-/g'
 }
 
 launch_detached_restart() {
+  local child_start_notify="${1:-true}"
+  local announce_detached="${2:-true}"
   if [[ "$(platform_name)" != "linux" ]]; then
     echo "DETACH=true currently requires Linux systemd user services." >&2
     exit 1
@@ -237,29 +273,36 @@ launch_detached_restart() {
     exit 1
   fi
 
-  local unit_name now_iso queued_msg
+  local unit_name now_iso queued_msg notify_scope_id notify_chat_id notify_topic_id
   unit_name="${SAFE_RESTART_UNIT_PREFIX}-$(run_id_for_unit)"
-  now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  queued_msg=$'[bridge] restart queued (detached)\n'
-  queued_msg+="time: ${now_iso}"$'\n'
-  queued_msg+="run_id: ${RUN_ID}"$'\n'
-  queued_msg+="unit: ${unit_name}"
-  echo "$queued_msg"
-  notify_telegram "$queued_msg"
+  notify_scope_id="$(resolve_notify_scope_id)"
+  notify_chat_id="$(resolve_notify_chat_id)"
+  notify_topic_id="$(resolve_notify_topic_id)"
+  if [[ "$announce_detached" == "true" ]]; then
+    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    queued_msg=$'[bridge] restart queued (detached)\n'
+    queued_msg+="time: ${now_iso}"$'\n'
+    queued_msg+="run_id: ${RUN_ID}"$'\n'
+    queued_msg+="unit: ${unit_name}"
+    echo "$queued_msg"
+    notify_telegram "$queued_msg"
+  fi
 
   systemd-run --user --unit "$unit_name" --collect --quiet \
     --setenv=DETACH=false \
     --setenv=RUN_ID="$RUN_ID" \
     --setenv=BUILD_BEFORE_RESTART="$BUILD_BEFORE_RESTART" \
     --setenv=NOTIFY_TELEGRAM="$NOTIFY_TELEGRAM" \
-    --setenv=START_NOTIFY=true \
+    --setenv=START_NOTIFY="$child_start_notify" \
     --setenv=RESTART_TIMEOUT_SEC="$RESTART_TIMEOUT_SEC" \
     --setenv=RESTART_POLL_SEC="$RESTART_POLL_SEC" \
     --setenv=ENV_FILE="$ENV_FILE" \
     --setenv=STATUS_FILE="$STATUS_FILE" \
+    --setenv=NOTIFY_TARGET="$NOTIFY_TARGET" \
+    --setenv=NOTIFY_SCOPE_ID="$notify_scope_id" \
     --setenv=NOTIFY_BOT_TOKEN="${NOTIFY_BOT_TOKEN:-}" \
-    --setenv=NOTIFY_CHAT_ID="${NOTIFY_CHAT_ID:-}" \
-    --setenv=NOTIFY_TOPIC_ID="${NOTIFY_TOPIC_ID:-}" \
+    --setenv=NOTIFY_CHAT_ID="${NOTIFY_CHAT_ID:-$notify_chat_id}" \
+    --setenv=NOTIFY_TOPIC_ID="${NOTIFY_TOPIC_ID:-$notify_topic_id}" \
     /bin/bash -lc "'${SCRIPT_DIR}/restart-safe.sh'"
 
   echo "Detached unit launched: ${unit_name}"
@@ -332,23 +375,23 @@ read_service_pid() {
 main() {
   require_supported_platform
   load_env_file
-  if [[ "$DETACH" == "true" ]]; then
-    launch_detached_restart
-    return 0
-  fi
 
   local commit branch now_iso restart_started_ms
   branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   commit="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  if should_auto_detach; then
+    if [[ "$START_NOTIFY" == "true" ]]; then
+      emit_restart_started "$branch" "$commit"
+    fi
+    launch_detached_restart false false
+    return 0
+  fi
+  if [[ "$DETACH" == "true" ]]; then
+    launch_detached_restart true true
+    return 0
+  fi
   if [[ "$START_NOTIFY" == "true" ]]; then
-    now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local start_msg
-    start_msg=$'[bridge] restart started\n'
-    start_msg+="time: ${now_iso}"$'\n'
-    start_msg+="run_id: ${RUN_ID}"$'\n'
-    start_msg+="commit: ${branch}@${commit}"
-    echo "$start_msg"
-    notify_telegram "$start_msg"
+    emit_restart_started "$branch" "$commit"
   fi
 
   if [[ "$BUILD_BEFORE_RESTART" == "true" ]]; then

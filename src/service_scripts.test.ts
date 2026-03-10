@@ -209,6 +209,7 @@ exit 0
       BUILD_BEFORE_RESTART: 'false',
       RESTART_TIMEOUT_SEC: '5',
       RESTART_POLL_SEC: '1',
+      DETACH: 'false',
     },
     encoding: 'utf8',
   });
@@ -223,5 +224,153 @@ exit 0
 
   const systemctlCalls = fs.readFileSync(systemctlLog, 'utf8');
   assert.match(systemctlCalls, /--user daemon-reload/);
+  assert.match(systemctlCalls, /--user restart com\.ganxing\.telegram-codex-app-bridge\.service/);
+});
+
+test('restart-safe auto-detaches inside the bridge service and still emits the final callback', () => {
+  const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-restart-safe-auto-detach-'));
+  const fakeHome = path.join(tempDir, 'home');
+  const fakeBin = path.join(tempDir, 'bin');
+  const fakeConfigHome = path.join(tempDir, '.config');
+  const fakeDataDir = path.join(fakeHome, '.telegram-codex-app-bridge', 'data');
+  const statusFile = path.join(fakeHome, '.telegram-codex-app-bridge', 'runtime', 'status.json');
+  const dbPath = path.join(fakeDataDir, 'bridge.sqlite');
+  const envFile = path.join(tempDir, '.env');
+  const curlLog = path.join(tempDir, 'curl.log');
+  const systemctlLog = path.join(tempDir, 'systemctl.log');
+  const systemdRunLog = path.join(tempDir, 'systemd-run.log');
+  const systemdRunEnvLog = path.join(tempDir, 'systemd-run.env.log');
+  const fakeCgroupFile = path.join(tempDir, 'cgroup');
+  const realUname = spawnSync('sh', ['-c', 'command -v uname'], { encoding: 'utf8' }).stdout.trim() || '/usr/bin/uname';
+
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(fakeConfigHome, { recursive: true });
+  fs.mkdirSync(fakeDataDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+  fs.mkdirSync(path.join(fakeConfigHome, 'systemd', 'user'), { recursive: true });
+  fs.writeFileSync(
+    path.join(fakeConfigHome, 'systemd', 'user', 'com.ganxing.telegram-codex-app-bridge.service'),
+    '[Unit]\nDescription=test\n',
+    'utf8',
+  );
+  fs.writeFileSync(statusFile, JSON.stringify({
+    running: true,
+    connected: true,
+    updatedAt: '2000-01-01T00:00:00.000Z',
+  }), 'utf8');
+  fs.writeFileSync(envFile, [
+    'TG_BOT_TOKEN=test-token',
+    'TG_ALLOWED_USER_ID=7689890344',
+    'TG_ALLOWED_CHAT_ID=-1003742428605',
+    'TG_ALLOWED_TOPIC_ID=2',
+    `STORE_PATH=${dbPath}`,
+  ].join('\n'), 'utf8');
+  fs.writeFileSync(
+    fakeCgroupFile,
+    '0::/user.slice/user-1000.slice/user@1000.service/app.slice/com.ganxing.telegram-codex-app-bridge.service\n',
+    'utf8',
+  );
+
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      direction TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  db.prepare('INSERT INTO audit_logs (direction, chat_id, event_type, summary, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run('inbound', '7689890344::root', 'telegram.message', 'private', 20);
+  db.close();
+
+  writeExecutable(path.join(fakeBin, 'systemctl'), [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> "${systemctlLog}"`,
+    'if [ "${2:-}" = "restart" ]; then',
+    `  node -e "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ running: true, connected: true, updatedAt: new Date().toISOString() }))" "${statusFile}"`,
+    'fi',
+    'exit 0',
+    '',
+  ].join('\n'));
+
+  writeExecutable(path.join(fakeBin, 'systemd-run'), [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> "${systemdRunLog}"`,
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    '    --setenv=*)',
+    '      kv="${1#--setenv=}"',
+    `      printf '%s\\n' "$kv" >> "${systemdRunEnvLog}"`,
+    '      export "$kv"',
+    '      shift',
+    '      ;;',
+    '    --unit)',
+    '      shift 2',
+    '      ;;',
+    '    --user|--collect|--quiet)',
+    '      shift',
+    '      ;;',
+    '    *)',
+    '      break',
+    '      ;;',
+    '  esac',
+    'done',
+    '"$@"',
+    '',
+  ].join('\n'));
+
+  writeExecutable(path.join(fakeBin, 'curl'), `#!/bin/sh
+printf '%s\n' "$*" >> "${curlLog}"
+printf '{"ok":true}'
+exit 0
+`);
+
+  writeExecutable(path.join(fakeBin, 'uname'), [
+    '#!/bin/sh',
+    'if [ "${1:-}" = "-s" ]; then',
+    '  echo "Linux"',
+    '  exit 0',
+    'fi',
+    `exec "${realUname}" "$@"`,
+    '',
+  ].join('\n'));
+
+  const result = spawnSync('bash', [path.join(rootDir, 'scripts/service/restart-safe.sh')], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      HOME: fakeHome,
+      XDG_CONFIG_HOME: fakeConfigHome,
+      PATH: `${fakeBin}:${process.env.PATH || ''}`,
+      ENV_FILE: envFile,
+      STATUS_FILE: statusFile,
+      BUILD_BEFORE_RESTART: 'false',
+      RESTART_TIMEOUT_SEC: '5',
+      RESTART_POLL_SEC: '1',
+      SAFE_RESTART_CGROUP_FILE: fakeCgroupFile,
+    },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /\[bridge\] restart started/);
+  assert.match(result.stdout, /Detached unit launched:/);
+  assert.match(result.stdout, /\[bridge\] restart succeeded/);
+  assert.doesNotMatch(result.stdout, /\[bridge\] restart queued \(detached\)/);
+
+  const curlCalls = fs.readFileSync(curlLog, 'utf8');
+  assert.equal((curlCalls.match(/chat_id=7689890344/g) ?? []).length, 2);
+  assert.doesNotMatch(curlCalls, /message_thread_id=/);
+
+  const systemdRunEnv = fs.readFileSync(systemdRunEnvLog, 'utf8');
+  assert.match(systemdRunEnv, /^DETACH=false$/m);
+  assert.match(systemdRunEnv, /^START_NOTIFY=false$/m);
+  assert.match(systemdRunEnv, /^NOTIFY_SCOPE_ID=7689890344::root$/m);
+
+  const systemctlCalls = fs.readFileSync(systemctlLog, 'utf8');
   assert.match(systemctlCalls, /--user restart com\.ganxing\.telegram-codex-app-bridge\.service/);
 });

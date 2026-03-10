@@ -66,6 +66,7 @@ After install, use:
 ```
 
 `restart-safe.sh` runs build + restart in sequence, waits until runtime status reports `running=true` and `connected=true`, then sends a Telegram callback message (success/failure with timestamp, commit, and pid).
+When it is invoked from inside the bridge's own systemd service, it now auto-detaches into a transient `systemd-run --user` job so the final success/failure callback survives the restart.
 
 Useful environment overrides:
 
@@ -78,7 +79,8 @@ NOTIFY_CHAT_ID=123456789 ./scripts/service/restart-safe.sh
 DETACH=true BUILD_BEFORE_RESTART=false ./scripts/service/restart-safe.sh
 ```
 
-`DETACH=true` launches a transient user-systemd job (`systemd-run --user`) so restart completion and Telegram callbacks still happen even if the current terminal/chat session is interrupted.
+`DETACH=true` always launches a transient user-systemd job (`systemd-run --user`) so restart completion and Telegram callbacks still happen even if the current terminal/chat session is interrupted.
+The default `DETACH=auto` only does that when the script is triggered from inside the running bridge service itself.
 `NOTIFY_TARGET` defaults to `auto`: it replies to the most recent inbound Telegram scope recorded by the bridge, so private-chat activity gets a private callback and topic activity gets a topic callback. If no recent scope is available, it falls back to the configured private chat / group defaults.
 
 ## Codex Skill
