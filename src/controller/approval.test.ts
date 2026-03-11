@@ -6,9 +6,10 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController, renderApprovalDetailsMessage, renderApprovalMessage } from './controller.js';
+import { renderApprovalDetailsMessage, renderApprovalMessage } from './approval_input.js';
 import type { PendingApprovalRecord } from '../types.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
+import { createBridgeComposition } from './composition.js';
 
 function makeApproval(kind: PendingApprovalRecord['kind'] = 'command'): PendingApprovalRecord {
   return {
@@ -89,7 +90,7 @@ test('approval details callback edits the existing approval card in place', asyn
     },
     async respond() {},
   };
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
@@ -99,11 +100,11 @@ test('approval details callback edits the existing approval card in place', asyn
   store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
   store.savePendingApproval(makeApproval('fileChange'));
 
-  await (controller as any).handleCallback(makeCallback('approval:aa11bb22:details'));
+  await composition.telegramRouter.handleCallback(makeCallback('approval:aa11bb22:details'));
   assert.match(bot.edits[0]?.text ?? '', /Approval details/);
   assert.equal((bot.edits[0]?.keyboard as Array<Array<{ callback_data: string }>>)?.[1]?.[0]?.callback_data, 'approval:aa11bb22:back');
 
-  await (controller as any).handleCallback(makeCallback('approval:aa11bb22:back'));
+  await composition.telegramRouter.handleCallback(makeCallback('approval:aa11bb22:back'));
   assert.match(bot.edits[1]?.text ?? '', /Approval requested: file change/);
   assert.match(bot.answers.at(-1) ?? '', /summary/i);
 

@@ -6,25 +6,25 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
 ) => Promise<void>): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-settings-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     makeApp() as any,
   );
-  return Promise.resolve(run(controller, store, bot)).finally(() => {
+  return Promise.resolve(run(composition, store, bot)).finally(() => {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -103,7 +103,7 @@ function makeCallback(data: string): TelegramCallbackEvent {
 }
 
 test('settings callback toggles guided-plan preferences and refreshes the settings home panel', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.setChatGuidedPlanPreferences('chat-1', {
       confirmPlanBeforeExecute: true,
@@ -112,7 +112,7 @@ test('settings callback toggles guided-plan preferences and refreshes the settin
     });
     store.setBinding('chat-1', 'thread-1', '/tmp/demo');
 
-    await (controller as any).handleCallback(makeCallback('settings:queue:off'));
+    await composition.telegramRouter.handleCallback(makeCallback('settings:queue:off'));
 
     const settings = store.getChatSettings('chat-1');
     assert.equal(settings?.autoQueueMessages, false);

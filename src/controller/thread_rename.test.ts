@@ -6,26 +6,27 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
+  app: ReturnType<typeof makeApp>,
 ) => Promise<void>): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-thread-rename-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const app = makeApp();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     app as any,
   );
-  return Promise.resolve(run(controller, store, bot)).finally(() => {
+  return Promise.resolve(run(composition, store, bot, app)).finally(() => {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -152,7 +153,7 @@ function makeText(text: string): TelegramTextEvent {
 }
 
 test('thread rename flow captures text, syncs codex rename, and persists override after confirmation', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.cacheThreadList('chat-1', [{
       threadId: 'thread-1',
@@ -164,16 +165,15 @@ test('thread rename flow captures text, syncs codex rename, and persists overrid
       updatedAt: 100,
     }]);
 
-    await (controller as any).handleCallback(makeCallback('thread:rename:start:thread-1'));
+    await composition.telegramRouter.handleCallback(makeCallback('thread:rename:start:thread-1'));
     assert.match(bot.sent.at(-1)?.text ?? '', /Rename thread thread-1/);
     const promptMessageId = 101;
 
-    await (controller as any).handleText(makeText('  New    Thread   Name  '));
+    await composition.telegramRouter.handleText(makeText('  New    Thread   Name  '));
     assert.equal(bot.edits.at(-1)?.messageId, promptMessageId);
     assert.match(bot.edits.at(-1)?.text ?? '', /To: New Thread Name/);
 
-    await (controller as any).handleCallback(makeCallback('thread:rename:confirm:thread-1', promptMessageId));
-    const app = (controller as any).app;
+    await composition.telegramRouter.handleCallback(makeCallback('thread:rename:confirm:thread-1', promptMessageId));
     assert.deepEqual(app.renameCalls, [{ threadId: 'thread-1', name: 'New Thread Name' }]);
     assert.equal(store.getThreadNameOverride('chat-1', 'thread-1'), 'New Thread Name');
     assert.match(bot.edits.at(-1)?.text ?? '', /Thread renamed to: New Thread Name/);

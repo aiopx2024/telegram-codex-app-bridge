@@ -6,12 +6,12 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { GuidedPlanSession } from '../types.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
   app: ReturnType<typeof makeApp>,
@@ -20,15 +20,15 @@ function withController(run: (
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const app = makeApp();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     app as any,
   );
-  return Promise.resolve(run(controller, store, bot, app)).finally(async () => {
-    await (controller as any).abandonActiveTurns();
+  return Promise.resolve(run(composition, store, bot, app)).finally(async () => {
+    await composition.turnLifecycle.abandonAllTurns();
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -143,14 +143,14 @@ function makeCallbackEvent(messageId = 55): TelegramCallbackEvent {
 }
 
 test('plan confirmation callback starts an execution turn on the same session', async () => {
-  await withController(async (controller, store, bot, app) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.setChatCollaborationMode('chat-1', 'plan');
     store.setBinding('chat-1', 'thread-1', '/tmp/demo');
     store.savePlanSession(makePlanSession());
-    (controller as any).attachedThreads.add('thread-1');
+    composition.attachedThreads.add('thread-1');
 
-    await (controller as any).handlePlanSessionCallback(makeCallbackEvent(), 'session-1', 'confirm', 'en');
+    await composition.guidedPlans.handlePlanSessionCallback(makeCallbackEvent(), 'session-1', 'confirm', 'en');
 
     const session = store.getPlanSession('session-1');
     assert.equal(session?.state, 'executing_confirmed_plan');
@@ -159,17 +159,17 @@ test('plan confirmation callback starts an execution turn on the same session', 
     assert.equal(bot.answered.at(-1), 'Execution started');
     assert.match(bot.edits.at(-1)?.text ?? '', /Plan decision recorded/);
     assert.match(app.startTurnCalls[0]?.developerInstructions ?? '', /The user confirmed the latest plan\./);
-    assert.equal((controller as any).activeTurns.get('turn-1')?.guidedPlanDraftOnly, false);
+    assert.equal(composition.activeTurns.get('turn-1')?.guidedPlanDraftOnly, false);
   });
 });
 
 test('plan confirmation callback cancels the pending session without starting a turn', async () => {
-  await withController(async (controller, store, bot, app) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.setChatCollaborationMode('chat-1', 'plan');
     store.savePlanSession(makePlanSession());
 
-    await (controller as any).handlePlanSessionCallback(makeCallbackEvent(), 'session-1', 'cancel', 'en');
+    await composition.guidedPlans.handlePlanSessionCallback(makeCallbackEvent(), 'session-1', 'cancel', 'en');
 
     const session = store.getPlanSession('session-1');
     assert.equal(session?.state, 'cancelled');
@@ -181,7 +181,7 @@ test('plan confirmation callback cancels the pending session without starting a 
 });
 
 test('plan notifications persist semantic snapshots and stream draft deltas into one card', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.setChatCollaborationMode('chat-1', 'plan');
     store.setBinding('chat-1', 'thread-1', '/tmp/demo');
@@ -194,7 +194,7 @@ test('plan notifications persist semantic snapshots and stream draft deltas into
       lastPromptMessageId: null,
     });
 
-    (controller as any).activeTurns.set('turn-1', {
+    composition.activeTurns.set('turn-1', {
       scopeId: 'chat-1',
       chatId: 'chat-1',
       topicId: null,
@@ -234,10 +234,11 @@ test('plan notifications persist semantic snapshots and stream draft deltas into
       forceStatusFlush: false,
       forceStreamFlush: false,
       renderTask: null,
+      queuedInputId: null,
       resolver: () => {},
     });
 
-    await (controller as any).syncTurnPlan((controller as any).activeTurns.get('turn-1'), {
+    await composition.turnExecution.syncTurnPlan(composition.activeTurns.get('turn-1') as any, {
       turnId: 'turn-1',
       explanation: 'Inspect the repository first.',
       plan: [
@@ -251,7 +252,7 @@ test('plan notifications persist semantic snapshots and stream draft deltas into
     assert.equal(firstSnapshots[0]?.version, 1);
     assert.match(bot.htmlMessages[0]?.text ?? '', /Current version: 1/);
 
-    await (controller as any).syncTurnPlan((controller as any).activeTurns.get('turn-1'), {
+    await composition.turnExecution.syncTurnPlan(composition.activeTurns.get('turn-1') as any, {
       turnId: 'turn-1',
       explanation: 'Inspect the repository first.',
       plan: [
@@ -262,7 +263,7 @@ test('plan notifications persist semantic snapshots and stream draft deltas into
 
     assert.equal(store.listPlanSnapshots('session-1').length, 1);
 
-    await (controller as any).handleNotification({
+    await composition.codexRouter.handleNotification({
       method: 'item/plan/delta',
       params: {
         turnId: 'turn-1',
@@ -274,7 +275,7 @@ test('plan notifications persist semantic snapshots and stream draft deltas into
     assert.match(bot.edits.at(-1)?.text ?? '', /Updating plan\.\.\./);
     assert.match(bot.edits.at(-1)?.text ?? '', /Refining the second step with more detail\./);
 
-    await (controller as any).syncTurnPlan((controller as any).activeTurns.get('turn-1'), {
+    await composition.turnExecution.syncTurnPlan(composition.activeTurns.get('turn-1') as any, {
       turnId: 'turn-1',
       explanation: 'Inspect the repository first, then patch carefully.',
       plan: [

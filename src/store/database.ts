@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_GUIDED_PLAN_PREFERENCES } from '../types.js';
+import { openSqliteDatabase, type SqliteDatabase } from './sqlite.js';
 import type {
   AccessPresetValue,
   AppLocale,
@@ -55,11 +55,11 @@ export interface HistoricalCleanupResult {
 }
 
 export class BridgeStore {
-  private db: DatabaseSync;
+  private db: SqliteDatabase;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSync(dbPath);
+    this.db = openSqliteDatabase(dbPath);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS telegram_offsets (
         bot_key TEXT PRIMARY KEY,

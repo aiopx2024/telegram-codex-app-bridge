@@ -6,10 +6,10 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
 ) => Promise<void>): Promise<void> {
@@ -17,14 +17,14 @@ function withController(run: (
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const app = makeApp();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     app as any,
   );
-  return Promise.resolve(run(controller, store, bot)).finally(() => {
+  return Promise.resolve(run(composition, store, bot)).finally(() => {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -114,15 +114,16 @@ function makeActiveTurn(overrides: Record<string, unknown> = {}): any {
 }
 
 test('ensureStatusMessage keeps existing preview when edit fails transiently', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     bot.editError = new Error('Too Many Requests: retry after 31');
-    (controller as any).scheduleRenderRetry = (active: any) => {
+    const scheduleRenderRetry = (active: any) => {
       active._retryCount = (active._retryCount ?? 0) + 1;
     };
+    (composition.statusPreview as any).host.scheduleRenderRetry = scheduleRenderRetry;
 
     const active = makeActiveTurn();
-    await (controller as any).ensureStatusMessage(active, 'Thinking...');
+    await composition.statusPreview.ensureStatusMessage(active, 'Thinking...');
 
     assert.equal(bot.editCalls.length, 1);
     assert.equal(bot.sendCalls.length, 0);
@@ -133,15 +134,15 @@ test('ensureStatusMessage keeps existing preview when edit fails transiently', a
 });
 
 test('rebaseStatusMessage does not create a new preview when old preview delete fails', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     bot.deleteError = new Error('Too Many Requests: retry after 31');
-    (controller as any).scheduleRenderRetry = (active: any) => {
+    (composition.statusPreview as any).host.scheduleRenderRetry = (active: any) => {
       active._retryCount = (active._retryCount ?? 0) + 1;
     };
 
     const active = makeActiveTurn({ statusNeedsRebase: true });
-    await (controller as any).rebaseStatusMessage(active, 'Thinking...');
+    await composition.statusPreview.rebaseStatusMessage(active, 'Thinking...');
 
     assert.equal(bot.deleteCalls.length, 1);
     assert.equal(bot.sendCalls.length, 0);
@@ -153,12 +154,12 @@ test('rebaseStatusMessage does not create a new preview when old preview delete 
 });
 
 test('ensureStatusMessage recreates preview only when old message is gone', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     bot.editError = new Error('Bad Request: message to edit not found');
 
     const active = makeActiveTurn();
-    await (controller as any).ensureStatusMessage(active, 'Thinking...');
+    await composition.statusPreview.ensureStatusMessage(active, 'Thinking...');
 
     assert.equal(bot.editCalls.length, 1);
     assert.equal(bot.sendCalls.length, 1);

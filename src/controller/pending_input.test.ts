@@ -6,10 +6,12 @@ import {
   renderCancelledPendingUserInputMessage,
   renderPendingUserInputMessage,
   renderPendingUserInputReviewMessage,
+  renderResolvedPendingUserInputMessage,
+} from './approval_input.js';
+import {
   renderPlanConfirmationMessage,
   renderResolvedPlanConfirmationMessage,
-  renderResolvedPendingUserInputMessage,
-} from './controller.js';
+} from './guided_plan.js';
 import type { GuidedPlanSession, PendingUserInputRecord } from '../types.js';
 
 function makeRecord(): PendingUserInputRecord {

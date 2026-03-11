@@ -7,12 +7,12 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
 import type { TelegramTextEvent } from '../telegram/gateway.js';
 import type { TelegramInboundAttachment } from '../telegram/media.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
   app: ReturnType<typeof makeApp>,
@@ -22,15 +22,15 @@ function withController(run: (
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const app = makeApp();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     app as any,
   );
-  return Promise.resolve(run(controller, store, bot, app, tempDir)).finally(async () => {
-    await (controller as any).abandonActiveTurns();
+  return Promise.resolve(run(composition, store, bot, app, tempDir)).finally(async () => {
+    await composition.turnLifecycle.abandonAllTurns();
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -178,25 +178,25 @@ async function waitFor(assertion: () => void, timeoutMs = 1500): Promise<void> {
   }
 }
 
-async function seedActiveTurn(controller: BridgeController, store: BridgeStore, cwd: string): Promise<void> {
+async function seedActiveTurn(composition: ReturnType<typeof createBridgeComposition>, store: BridgeStore, cwd: string): Promise<void> {
   store.setBinding('chat-1', 'thread-1', cwd);
-  (controller as any).attachedThreads.add('thread-1');
-  await (controller as any).startIncomingTurn(
+  composition.attachedThreads.add('thread-1');
+  await composition.turnExecution.startIncomingTurn(
     'chat-1',
     'chat-1',
     'private',
     null,
-    store.getBinding('chat-1'),
+    store.getBinding('chat-1')!,
     [{ type: 'text', text: 'Initial turn', text_elements: [] }],
   );
 }
 
 test('running messages are queued instead of rejected', async () => {
-  await withController(async (controller, store, bot, _app, tempDir) => {
+  await withComposition(async (composition, store, bot, _app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
-    await seedActiveTurn(controller, store, tempDir);
+    await seedActiveTurn(composition, store, tempDir);
 
-    await (controller as any).handleText(makeTextEvent('Follow up while busy'));
+    await composition.telegramRouter.handleText(makeTextEvent('Follow up while busy'));
 
     const queued = store.peekQueuedTurnInput('chat-1');
     assert.equal(queued?.status, 'queued');
@@ -206,11 +206,11 @@ test('running messages are queued instead of rejected', async () => {
 });
 
 test('queued attachment messages are normalized before they are persisted', async () => {
-  await withController(async (controller, store, bot, _app, tempDir) => {
+  await withComposition(async (composition, store, bot, _app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
-    await seedActiveTurn(controller, store, tempDir);
+    await seedActiveTurn(composition, store, tempDir);
 
-    await (controller as any).handleText(makeTextEvent('Review this image', [makePhotoAttachment()]));
+    await composition.telegramRouter.handleText(makeTextEvent('Review this image', [makePhotoAttachment()]));
 
     const queued = store.peekQueuedTurnInput('chat-1');
     assert.ok(queued);
@@ -224,24 +224,24 @@ test('queued attachment messages are normalized before they are persisted', asyn
 });
 
 test('turn completion automatically starts the next queued message in FIFO order', async () => {
-  await withController(async (controller, store, _bot, app, tempDir) => {
+  await withComposition(async (composition, store, _bot, app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
-    await seedActiveTurn(controller, store, tempDir);
+    await seedActiveTurn(composition, store, tempDir);
 
-    await (controller as any).handleText(makeTextEvent('Queued one'));
-    await (controller as any).handleText(makeTextEvent('Queued two'));
+    await composition.telegramRouter.handleText(makeTextEvent('Queued one'));
+    await composition.telegramRouter.handleText(makeTextEvent('Queued two'));
 
     const queuedRecords = store.listQueuedTurnInputs('chat-1').filter((record) => record.status === 'queued');
     assert.equal(queuedRecords.length, 2);
 
-    await (controller as any).handleTurnActivityEvent({ kind: 'turn_completed', turnId: 'turn-1', state: 'completed' });
+    await composition.turnExecution.handleTurnActivityEvent({ kind: 'turn_completed', turnId: 'turn-1', state: 'completed' });
     await waitFor(() => {
       assert.equal(app.startTurnCalls.length, 2);
       assert.equal(store.getQueuedTurnInput(queuedRecords[0]!.queueId)?.status, 'processing');
     });
     assert.equal(app.startTurnCalls[1]?.input?.[0]?.text, 'Queued one');
 
-    await (controller as any).handleTurnActivityEvent({ kind: 'turn_completed', turnId: 'turn-2', state: 'completed' });
+    await composition.turnExecution.handleTurnActivityEvent({ kind: 'turn_completed', turnId: 'turn-2', state: 'completed' });
     await waitFor(() => {
       assert.equal(app.startTurnCalls.length, 3);
       assert.equal(store.getQueuedTurnInput(queuedRecords[0]!.queueId)?.status, 'completed');
@@ -252,13 +252,13 @@ test('turn completion automatically starts the next queued message in FIFO order
 });
 
 test('queue command can clear queued messages', async () => {
-  await withController(async (controller, store, bot, _app, tempDir) => {
+  await withComposition(async (composition, store, bot, _app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
-    await seedActiveTurn(controller, store, tempDir);
+    await seedActiveTurn(composition, store, tempDir);
 
-    await (controller as any).handleText(makeTextEvent('Queued one'));
-    await (controller as any).handleText(makeTextEvent('Queued two'));
-    await (controller as any).handleCommand(makeTextEvent('/queue clear'), 'en', 'queue', ['clear']);
+    await composition.telegramRouter.handleText(makeTextEvent('Queued one'));
+    await composition.telegramRouter.handleText(makeTextEvent('Queued two'));
+    await composition.telegramRouter.handleCommand(makeTextEvent('/queue clear'), 'en', 'queue', ['clear']);
 
     assert.equal(store.countQueuedTurnInputs('chat-1'), 0);
     assert.match(bot.messages.at(-1)?.text ?? '', /Cleared queued messages: 2/);

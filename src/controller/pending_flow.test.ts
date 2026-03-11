@@ -6,12 +6,12 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { PendingUserInputRecord } from '../types.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
   app: ReturnType<typeof makeApp>,
@@ -20,14 +20,14 @@ function withController(run: (
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const app = makeApp();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     app as any,
   );
-  return Promise.resolve(run(controller, store, bot, app)).finally(() => {
+  return Promise.resolve(run(composition, store, bot, app)).finally(() => {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -140,11 +140,11 @@ function makeRecord(overrides: Partial<PendingUserInputRecord> = {}): PendingUse
 }
 
 test('last pending-input answer moves into review and waits for explicit submit', async () => {
-  await withController(async (controller, store, bot, app) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.savePendingUserInput(makeRecord());
 
-    await (controller as any).handlePendingUserInputCallback(makeCallback(), 'input-1', 'option:0', 'en');
+    await composition.approvalsAndInputs.handlePendingUserInputCallback(makeCallback(), 'input-1', 'option:0', 'en');
 
     const record = store.getPendingUserInput('input-1');
     assert.equal(record?.resolvedAt, null);
@@ -152,7 +152,7 @@ test('last pending-input answer moves into review and waits for explicit submit'
     assert.deepEqual(app.responses, []);
     assert.match(bot.edits.at(-1)?.text ?? '', /Review answers/);
 
-    await (controller as any).handlePendingUserInputCallback(makeCallback(), 'input-1', 'submit', 'en');
+    await composition.approvalsAndInputs.handlePendingUserInputCallback(makeCallback(), 'input-1', 'submit', 'en');
 
     assert.equal(app.responses.length, 1);
     const submitted = (app.responses as Array<{ id: string; result: unknown }>)[0];
@@ -166,7 +166,7 @@ test('last pending-input answer moves into review and waits for explicit submit'
 });
 
 test('pending-input back rewinds to the previous question and clears later answers', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.savePendingUserInput(makeRecord({
       questions: [
@@ -186,7 +186,7 @@ test('pending-input back rewinds to the previous question and clears later answe
       currentQuestionIndex: 1,
     }));
 
-    await (controller as any).handlePendingUserInputCallback(makeCallback(), 'input-1', 'back', 'en');
+    await composition.approvalsAndInputs.handlePendingUserInputCallback(makeCallback(), 'input-1', 'back', 'en');
 
     const record = store.getPendingUserInput('input-1');
     assert.equal(record?.currentQuestionIndex, 0);
@@ -196,11 +196,11 @@ test('pending-input back rewinds to the previous question and clears later answe
 });
 
 test('pending-input cancel sends an explicit respondError and resolves the record', async () => {
-  await withController(async (controller, store, bot, app) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.savePendingUserInput(makeRecord());
 
-    await (controller as any).handlePendingUserInputCallback(makeCallback(), 'input-1', 'cancel', 'en');
+    await composition.approvalsAndInputs.handlePendingUserInputCallback(makeCallback(), 'input-1', 'cancel', 'en');
 
     assert.equal(app.responseErrors.length, 1);
     assert.match(app.responseErrors[0]?.message ?? '', /cancelled/);
@@ -210,12 +210,12 @@ test('pending-input cancel sends an explicit respondError and resolves the recor
 });
 
 test('requestUserInput is rejected in default mode and no pending card is created', async () => {
-  await withController(async (controller, store, bot, app) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.setChatCollaborationMode('chat-1', 'default');
     store.setBinding('chat-1', 'thread-1', '/tmp/demo');
 
-    await (controller as any).handleServerRequest({
+    await composition.codexRouter.handleServerRequest({
       id: 'request-2',
       method: 'item/tool/requestUserInput',
       params: {
@@ -239,12 +239,12 @@ test('requestUserInput is rejected in default mode and no pending card is create
 });
 
 test('switching mode to default clears unresolved pending input cards', async () => {
-  await withController(async (controller, store, bot, app) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     store.setChatCollaborationMode('chat-1', 'plan');
     store.savePendingUserInput(makeRecord());
 
-    await (controller as any).handleModeCommand({ scopeId: 'chat-1' }, 'en', ['default']);
+    await composition.settings.handleModeCommand({ scopeId: 'chat-1' } as any, 'en', ['default']);
 
     assert.equal(store.listPendingUserInputs('chat-1').length, 0);
     assert.equal(app.responseErrors.length, 1);

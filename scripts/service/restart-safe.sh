@@ -63,7 +63,25 @@ read_latest_inbound_scope() {
   fi
   node - "$db_path" <<'NODE'
 const fs = require('node:fs');
-const { DatabaseSync } = require('node:sqlite');
+
+function loadDatabaseSync() {
+  const originalEmitWarning = process.emitWarning.bind(process);
+  process.emitWarning = (warning, ...args) => {
+    const type = typeof warning === 'string'
+      ? (typeof args[0] === 'string' ? args[0] : '')
+      : warning && warning.name;
+    const message = typeof warning === 'string' ? warning : warning && warning.message;
+    if (type === 'ExperimentalWarning' && typeof message === 'string' && message.includes('SQLite is an experimental feature')) {
+      return;
+    }
+    return originalEmitWarning(warning, ...args);
+  };
+  try {
+    return require('node:sqlite').DatabaseSync;
+  } finally {
+    process.emitWarning = originalEmitWarning;
+  }
+}
 
 const dbPath = process.argv[2];
 if (!dbPath || !fs.existsSync(dbPath)) {
@@ -71,6 +89,7 @@ if (!dbPath || !fs.existsSync(dbPath)) {
 }
 
 try {
+  const DatabaseSync = loadDatabaseSync();
   const db = new DatabaseSync(dbPath, { readOnly: true });
   const row = db.prepare(`
     SELECT chat_id
@@ -303,7 +322,7 @@ launch_detached_restart() {
     --setenv=NOTIFY_BOT_TOKEN="${NOTIFY_BOT_TOKEN:-}" \
     --setenv=NOTIFY_CHAT_ID="${NOTIFY_CHAT_ID:-$notify_chat_id}" \
     --setenv=NOTIFY_TOPIC_ID="${NOTIFY_TOPIC_ID:-$notify_topic_id}" \
-    /bin/bash -lc "'${SCRIPT_DIR}/restart-safe.sh'"
+    /bin/bash "${SCRIPT_DIR}/restart-safe.sh"
 
   echo "Detached unit launched: ${unit_name}"
 }

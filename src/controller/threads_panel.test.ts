@@ -7,25 +7,26 @@ import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
-import { BridgeController } from './controller.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
+  app: ReturnType<typeof makeApp>,
 ) => Promise<void>): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-threads-panel-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const app = makeApp();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     app as any,
   );
-  return Promise.resolve(run(controller, store, bot)).finally(() => {
+  return Promise.resolve(run(composition, store, bot, app)).finally(() => {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -182,8 +183,8 @@ function makeCallbackEvent(messageId: number, overrides: Partial<TelegramCallbac
 }
 
 test('threads panel renders inline keyboard buttons', async () => {
-  await withController(async (controller, _store, bot) => {
-    await (controller as any).showThreadsPanel('chat-1', undefined, null, 'en');
+  await withComposition(async (composition, _store, bot) => {
+    await composition.threadPanels.showThreadsPanel('chat-1', undefined, null, 'en');
 
     assert.equal(bot.htmlMessages.length, 1);
     assert.match(bot.htmlMessages[0]?.text ?? '', /Recent threads/);
@@ -195,8 +196,8 @@ test('threads panel renders inline keyboard buttons', async () => {
 });
 
 test('thread open callback sends a fresh history preview card each time', async () => {
-  await withController(async (controller, store, bot) => {
-    await (controller as any).showThreadsPanel('chat-1', undefined, null, 'en');
+  await withComposition(async (composition, store, bot) => {
+    await composition.threadPanels.showThreadsPanel('chat-1', undefined, null, 'en');
     const panelMessageId = bot.htmlMessages[0]!.messageId;
 
     store.cacheThreadList('chat-1', [{
@@ -209,14 +210,14 @@ test('thread open callback sends a fresh history preview card each time', async 
       updatedAt: 200,
     }]);
 
-    await (controller as any).handleThreadOpenCallback(makeCallbackEvent(panelMessageId), 'thread-1', 'en');
+    await composition.threadPanels.handleThreadOpenCallback(makeCallbackEvent(panelMessageId), 'thread-1', 'en');
     assert.equal(store.getBinding('chat-1')?.threadId, 'thread-1');
     assert.equal(bot.htmlEdits.length, 1);
     assert.equal(bot.htmlEdits[0]?.messageId, panelMessageId);
     assert.equal(bot.htmlMessages.length, 2);
     assert.match(bot.htmlMessages[1]?.text ?? '', /Recent context/);
 
-    await (controller as any).handleThreadOpenCallback(makeCallbackEvent(panelMessageId, { callbackQueryId: 'cb-2' }), 'thread-1', 'en');
+    await composition.threadPanels.handleThreadOpenCallback(makeCallbackEvent(panelMessageId, { callbackQueryId: 'cb-2' }), 'thread-1', 'en');
     assert.equal(bot.htmlEdits.length, 2);
     assert.equal(bot.htmlMessages.length, 3);
     assert.equal(bot.htmlMessages[2]?.messageId, store.getThreadHistoryPreview('chat-1')?.messageId);
@@ -225,7 +226,7 @@ test('thread open callback sends a fresh history preview card each time', async 
 });
 
 test('history preview strips pasted preview cards from recent turn text', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot, app) => {
     store.cacheThreadList('chat-1', [{
       threadId: 'thread-1',
       name: 'Codex历史项目',
@@ -236,7 +237,7 @@ test('history preview strips pasted preview cards from recent turn text', async 
       updatedAt: 200,
     }]);
 
-    (controller as any).app.readThreadWithTurns = async (threadId: string) => ({
+    app.readThreadWithTurns = async (threadId: string) => ({
       threadId,
       name: 'Codex历史项目',
       preview: 'Primary preview',
@@ -285,7 +286,7 @@ test('history preview strips pasted preview cards from recent turn text', async 
       ],
     });
 
-    await (controller as any).handleThreadOpenCallback(
+    await composition.threadPanels.handleThreadOpenCallback(
       makeCallbackEvent(101, { languageCode: 'zh', callbackQueryId: 'cb-zh' }),
       'thread-1',
       'zh',

@@ -1,0 +1,343 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import type { AppConfig } from '../config.js';
+import type { TurnInput, CodexAppClient } from '../codex_app/client.js';
+import { t } from '../i18n.js';
+import type { Logger } from '../logger.js';
+import type { BridgeStore } from '../store/database.js';
+import {
+  TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES,
+  buildAttachmentPrompt,
+  isNativeImageAttachment,
+  planAttachmentStoragePath,
+  type StagedTelegramAttachment,
+  type TelegramInboundAttachment,
+} from '../telegram/media.js';
+import type { TelegramGateway, TelegramTextEvent } from '../telegram/gateway.js';
+import type {
+  AppLocale,
+  CollaborationModeValue,
+  ReasoningEffortValue,
+  SandboxModeValue,
+  ThreadBinding,
+  ThreadSessionState,
+} from '../types.js';
+import { resolveAccessMode } from './access.js';
+import type { ThreadAttachmentRegistry } from './bridge_runtime.js';
+import type { ActiveTurn } from './turn_state.js';
+import { formatUserError, isThreadNotFoundError } from './utils.js';
+import { resolveCurrentModel } from './presentation.js';
+
+export class UserFacingError extends Error {}
+
+interface ThreadSessionHost {
+  config: AppConfig;
+  store: BridgeStore;
+  logger: Logger;
+  app: Pick<
+    CodexAppClient,
+    'listModels' | 'startThread' | 'startTurn' | 'resumeThread' | 'readThread' | 'revealThread'
+  >;
+  bot: Pick<TelegramGateway, 'getFile' | 'downloadResolvedFile'>;
+  attachedThreads: ThreadAttachmentRegistry;
+  localeForChat: (scopeId: string, languageCode?: string | null) => AppLocale;
+  sendMessage: (scopeId: string, text: string) => Promise<number>;
+  updateStatus: () => void;
+}
+
+interface StartTurnOptions {
+  developerInstructions?: string | null;
+  accessOverride?: { approvalPolicy: string; sandboxMode: SandboxModeValue };
+  collaborationModeOverride?: CollaborationModeValue | null;
+}
+
+export class ThreadSessionService {
+  constructor(private readonly host: ThreadSessionHost) {}
+
+  async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
+    const cwd = requestedCwd || this.host.config.defaultCwd;
+    const settings = this.host.store.getChatSettings(scopeId);
+    const access = resolveAccessMode(this.host.config, settings);
+    const session = await this.host.app.startThread({
+      cwd,
+      approvalPolicy: access.approvalPolicy,
+      sandboxMode: access.sandboxMode,
+      model: settings?.model ?? null,
+    });
+    return this.storeThreadSession(scopeId, session, 'seed');
+  }
+
+  async startTurnWithRecovery(
+    scopeId: string,
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+    input: TurnInput[],
+    options: StartTurnOptions = {},
+  ): Promise<{ threadId: string; turnId: string }> {
+    const settings = this.host.store.getChatSettings(scopeId);
+    const access = resolveAccessMode(this.host.config, settings);
+    const turnConfig = await this.resolveTurnConfiguration(scopeId, settings, options.collaborationModeOverride);
+    const effectiveAccess = options.accessOverride ?? access;
+    try {
+      const turn = await this.host.app.startTurn({
+        threadId: binding.threadId,
+        input,
+        approvalPolicy: effectiveAccess.approvalPolicy,
+        sandboxMode: effectiveAccess.sandboxMode,
+        cwd: binding.cwd ?? this.host.config.defaultCwd,
+        model: turnConfig.model,
+        effort: turnConfig.effort,
+        collaborationMode: turnConfig.collaborationMode,
+        developerInstructions: options.developerInstructions ?? null,
+      });
+      return { threadId: binding.threadId, turnId: turn.id };
+    } catch (error) {
+      if (!isThreadNotFoundError(error)) {
+        throw error;
+      }
+      this.host.logger.warn('codex.turn_thread_not_found', { scopeId, threadId: binding.threadId });
+      const replacement = await this.createBinding(scopeId, binding.cwd ?? this.host.config.defaultCwd);
+      await this.host.sendMessage(
+        scopeId,
+        t(this.host.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }),
+      );
+      const nextSettings = this.host.store.getChatSettings(scopeId);
+      const nextAccess = resolveAccessMode(this.host.config, nextSettings);
+      const nextTurnConfig = await this.resolveTurnConfiguration(scopeId, nextSettings, options.collaborationModeOverride);
+      const fallbackAccess = options.accessOverride ?? nextAccess;
+      const turn = await this.host.app.startTurn({
+        threadId: replacement.threadId,
+        input,
+        approvalPolicy: fallbackAccess.approvalPolicy,
+        sandboxMode: fallbackAccess.sandboxMode,
+        cwd: replacement.cwd ?? this.host.config.defaultCwd,
+        model: nextTurnConfig.model,
+        effort: nextTurnConfig.effort,
+        collaborationMode: nextTurnConfig.collaborationMode,
+        developerInstructions: options.developerInstructions ?? null,
+      });
+      return { threadId: replacement.threadId, turnId: turn.id };
+    }
+  }
+
+  async buildTurnInput(
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+    event: Pick<TelegramTextEvent, 'text' | 'attachments'>,
+    locale: AppLocale,
+  ): Promise<TurnInput[]> {
+    if (event.attachments.length === 0) {
+      return [{
+        type: 'text',
+        text: event.text,
+        text_elements: [],
+      }];
+    }
+
+    const cwd = binding.cwd ?? this.host.config.defaultCwd;
+    const stagedAttachments = await this.stageAttachments(cwd, binding.threadId, event.attachments, locale);
+    const prompt = buildAttachmentPrompt(event.text, stagedAttachments);
+    const input: TurnInput[] = [{
+      type: 'text',
+      text: prompt,
+      text_elements: [],
+    }];
+    for (const attachment of stagedAttachments) {
+      if (!attachment.nativeImage) {
+        continue;
+      }
+      input.push({
+        type: 'localImage',
+        path: attachment.localPath,
+      });
+    }
+    return input;
+  }
+
+  resolveActiveTurnBinding(scopeId: string, active: Pick<ActiveTurn, 'threadId'>): ThreadBinding {
+    const binding = this.host.store.getBinding(scopeId);
+    if (binding?.threadId === active.threadId) {
+      return binding;
+    }
+    return {
+      chatId: scopeId,
+      threadId: active.threadId,
+      cwd: binding?.cwd ?? this.host.config.defaultCwd,
+      updatedAt: Date.now(),
+    };
+  }
+
+  async ensureThreadReady(scopeId: string, binding: ThreadBinding): Promise<ThreadBinding> {
+    if (this.host.attachedThreads.has(binding.threadId)) {
+      return binding;
+    }
+    try {
+      const session = await this.host.app.resumeThread({ threadId: binding.threadId });
+      return this.storeThreadSession(scopeId, session, 'seed');
+    } catch (error) {
+      if (!isThreadNotFoundError(error)) {
+        throw error;
+      }
+      this.host.logger.warn('codex.thread_binding_stale', { scopeId, threadId: binding.threadId });
+      const replacement = await this.createBinding(scopeId, binding.cwd ?? this.host.config.defaultCwd);
+      await this.host.sendMessage(
+        scopeId,
+        t(this.host.localeForChat(scopeId), 'previous_thread_unavailable_started', { threadId: replacement.threadId }),
+      );
+      return {
+        chatId: scopeId,
+        threadId: replacement.threadId,
+        cwd: replacement.cwd,
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
+  async tryRevealThread(
+    scopeId: string,
+    threadId: string,
+    reason: 'open' | 'reveal' | 'turn-complete',
+  ): Promise<string | null> {
+    try {
+      await this.host.app.revealThread(threadId);
+      this.host.store.insertAudit('outbound', scopeId, 'codex.app.reveal', `${reason}:${threadId}`);
+      return null;
+    } catch (error) {
+      return formatUserError(error);
+    }
+  }
+
+  async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
+    const session = await this.host.app.resumeThread({ threadId });
+    return this.storeThreadSession(scopeId, session, 'replace');
+  }
+
+  async resolvePlanSessionBinding(scopeId: string, threadId: string): Promise<ThreadBinding> {
+    const existing = this.host.store.getBinding(scopeId);
+    if (existing?.threadId === threadId) {
+      return this.ensureThreadReady(scopeId, existing);
+    }
+    const thread = await this.host.app.readThread(threadId, false);
+    if (!thread) {
+      throw new Error(`Thread ${threadId} is unavailable`);
+    }
+    const cwd = thread.cwd ?? this.host.config.defaultCwd;
+    this.host.store.setBinding(scopeId, threadId, cwd);
+    return {
+      chatId: scopeId,
+      threadId,
+      cwd,
+      updatedAt: Date.now(),
+    };
+  }
+
+  handleSessionConfigured(scopeId: string, params: any): void {
+    const binding = this.host.store.getBinding(scopeId);
+    const cwd = params.cwd ? String(params.cwd) : binding?.cwd ?? null;
+    this.host.store.setBinding(scopeId, String(params.session_id), cwd);
+    const current = this.host.store.getChatSettings(scopeId);
+    const preserveDefaultModel = current !== null && current.model === null;
+    const preserveDefaultEffort = current !== null && current.reasoningEffort === null;
+    this.host.store.setChatSettings(
+      scopeId,
+      preserveDefaultModel
+        ? null
+        : params.model
+          ? String(params.model)
+          : current?.model ?? null,
+      preserveDefaultEffort
+        ? null
+        : params.reasoning_effort === undefined
+          ? current?.reasoningEffort ?? null
+          : params.reasoning_effort === null
+            ? null
+            : String(params.reasoning_effort) as ReasoningEffortValue,
+    );
+    this.host.updateStatus();
+  }
+
+  private storeThreadSession(scopeId: string, session: ThreadSessionState, syncMode: 'replace' | 'seed'): ThreadBinding {
+    const existing = this.host.store.getChatSettings(scopeId);
+    const hasExisting = existing !== null;
+    const model = syncMode === 'seed'
+      ? hasExisting ? existing.model : session.model
+      : session.model;
+    const effort = syncMode === 'seed'
+      ? hasExisting ? existing.reasoningEffort : session.reasoningEffort
+      : session.reasoningEffort;
+    const normalized: ThreadBinding = {
+      chatId: scopeId,
+      threadId: session.thread.threadId,
+      cwd: session.cwd,
+      updatedAt: Date.now(),
+    };
+    this.host.store.setBinding(scopeId, normalized.threadId, normalized.cwd);
+    this.host.store.setChatSettings(scopeId, model, effort);
+    this.host.attachedThreads.add(normalized.threadId);
+    this.host.updateStatus();
+    return normalized;
+  }
+
+  private async resolveTurnConfiguration(
+    scopeId: string,
+    settings = this.host.store.getChatSettings(scopeId),
+    collaborationModeOverride?: CollaborationModeValue | null,
+  ): Promise<{ model: string | null; effort: ReasoningEffortValue | null; collaborationMode: CollaborationModeValue | null }> {
+    let model = settings?.model ?? null;
+    const effort = settings?.reasoningEffort ?? null;
+    const collaborationMode = collaborationModeOverride === undefined
+      ? settings?.collaborationMode ?? null
+      : collaborationModeOverride;
+    if (collaborationMode === 'plan' && !model) {
+      const models = await this.host.app.listModels();
+      model = resolveCurrentModel(models, null)?.model ?? null;
+    }
+    return { model, effort, collaborationMode };
+  }
+
+  private async stageAttachments(
+    cwd: string,
+    threadId: string,
+    attachments: readonly TelegramInboundAttachment[],
+    locale: AppLocale,
+  ): Promise<StagedTelegramAttachment[]> {
+    const staged: StagedTelegramAttachment[] = [];
+    for (const attachment of attachments) {
+      try {
+        const remoteFile = await this.host.bot.getFile(attachment.fileId);
+        const resolvedSize = attachment.fileSize ?? remoteFile.file_size ?? null;
+        if (resolvedSize !== null && resolvedSize > TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES) {
+          throw new UserFacingError(t(locale, 'attachment_too_large', {
+            name: attachment.fileName ?? attachment.fileUniqueId,
+            size: resolvedSize,
+          }));
+        }
+        if (!remoteFile.file_path) {
+          throw new Error('Telegram file path is missing');
+        }
+        const planned = planAttachmentStoragePath(cwd, threadId, attachment, remoteFile.file_path);
+        await fs.mkdir(path.dirname(planned.localPath), { recursive: true });
+        await this.host.bot.downloadResolvedFile(remoteFile.file_path, planned.localPath);
+        const resolvedAttachment: TelegramInboundAttachment = {
+          ...attachment,
+          fileName: planned.fileName,
+          fileSize: resolvedSize,
+        };
+        staged.push({
+          ...resolvedAttachment,
+          fileName: planned.fileName,
+          localPath: planned.localPath,
+          relativePath: planned.relativePath,
+          nativeImage: isNativeImageAttachment(resolvedAttachment),
+        });
+      } catch (error) {
+        if (error instanceof UserFacingError) {
+          throw error;
+        }
+        throw new Error(t(locale, 'attachment_download_failed', {
+          name: attachment.fileName ?? attachment.fileUniqueId,
+          error: formatUserError(error),
+        }));
+      }
+    }
+    return staged;
+  }
+}

@@ -6,25 +6,25 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import { BridgeController } from './controller.js';
 import type { TelegramTextEvent } from '../telegram/gateway.js';
+import { createBridgeComposition } from './composition.js';
 
-function withController(run: (
-  controller: BridgeController,
+function withComposition(run: (
+  composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
 ) => Promise<void>): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-status-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
-  const controller = new BridgeController(
+  const composition = createBridgeComposition(
     makeConfig(tempDir),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
     makeApp() as any,
   );
-  return Promise.resolve(run(controller, store, bot)).finally(() => {
+  return Promise.resolve(run(composition, store, bot)).finally(() => {
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -117,10 +117,10 @@ function makeTextEvent(text: string): TelegramTextEvent {
 }
 
 test('/status shows 5-hour and weekly rate limit usage', async () => {
-  await withController(async (controller, store, bot) => {
+  await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'zh');
 
-    await (controller as any).handleCommand(makeTextEvent('/status'), 'zh', 'status', []);
+    await composition.telegramRouter.handleCommand(makeTextEvent('/status'), 'zh', 'status', []);
 
     const text = bot.messages[0]?.text ?? '';
     assert.match(text, /账户套餐：plus/);

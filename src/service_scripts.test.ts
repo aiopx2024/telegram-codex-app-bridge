@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { openSqliteDatabase } from './store/sqlite.js';
 
 function writeExecutable(pathname: string, content: string): void {
   fs.writeFileSync(pathname, content, { mode: 0o755 });
@@ -154,7 +154,7 @@ test('restart-safe parses spaced env values and notifies the latest inbound priv
     `STORE_PATH=${dbPath}`,
   ].join('\n'), 'utf8');
 
-  const db = new DatabaseSync(dbPath);
+  const db = openSqliteDatabase(dbPath);
   db.exec(`
     CREATE TABLE audit_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,7 +272,7 @@ test('restart-safe auto-detaches inside the bridge service and still emits the f
     'utf8',
   );
 
-  const db = new DatabaseSync(dbPath);
+  const db = openSqliteDatabase(dbPath);
   db.exec(`
     CREATE TABLE audit_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -370,6 +370,9 @@ exit 0
   assert.match(systemdRunEnv, /^DETACH=false$/m);
   assert.match(systemdRunEnv, /^START_NOTIFY=false$/m);
   assert.match(systemdRunEnv, /^NOTIFY_SCOPE_ID=7689890344::root$/m);
+
+  const systemdRunCalls = fs.readFileSync(systemdRunLog, 'utf8');
+  assert.doesNotMatch(systemdRunCalls, /(^|\s)-lc(\s|$)/);
 
   const systemctlCalls = fs.readFileSync(systemctlLog, 'utf8');
   assert.match(systemctlCalls, /--user restart com\.ganxing\.telegram-codex-app-bridge\.service/);
