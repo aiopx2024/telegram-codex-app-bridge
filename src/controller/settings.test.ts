@@ -7,6 +7,7 @@ import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
+import type { ModelInfo } from '../types.js';
 import { createBridgeComposition } from './composition.js';
 
 function withComposition(run: (
@@ -59,6 +60,7 @@ function makeBot() {
   return {
     answers: [] as string[],
     edits: [] as Array<{ messageId: number; text: string; keyboard: unknown }>,
+    messages: [] as string[],
     async answerCallback(_id: string, text: string) {
       this.answers.push(text);
     },
@@ -66,7 +68,10 @@ function makeBot() {
       this.edits.push({ messageId, text, keyboard: keyboard ?? null });
     },
     async sendHtmlMessage() { return 77; },
-    async sendMessage() { return 77; },
+    async sendMessage(_chatId: string, text: string) {
+      this.messages.push(text);
+      return 77;
+    },
     async editMessage() {},
     async clearMessageInlineKeyboard() {},
     async deleteMessage() {},
@@ -79,12 +84,24 @@ function makeBot() {
 }
 
 function makeApp() {
+  const models: ModelInfo[] = [{
+    id: 'model-gpt-5',
+    model: 'gpt-5',
+    displayName: 'OpenAI gpt-5',
+    description: 'Reasoning model',
+    isDefault: true,
+    supportedReasoningEfforts: ['medium', 'high'],
+    defaultReasoningEffort: 'medium',
+  }];
   return {
     isConnected() {
       return true;
     },
     getUserAgent() {
       return 'test-agent';
+    },
+    async listModels() {
+      return models;
     },
   };
 }
@@ -118,5 +135,41 @@ test('settings callback toggles guided-plan preferences and refreshes the settin
     assert.equal(settings?.autoQueueMessages, false);
     assert.match(bot.edits[0]?.text ?? '', /<b>Settings<\/b>/);
     assert.match(bot.answers[0] ?? '', /Auto queue: no/);
+  });
+});
+
+test('settings callback updates service tier inside the model settings panel', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+
+    await composition.telegramRouter.handleCallback(makeCallback('settings:tier:flex'));
+
+    const settings = store.getChatSettings('chat-1');
+    assert.equal(settings?.serviceTier, 'flex');
+    assert.match(bot.edits[0]?.text ?? '', /Service tier: <b>Flex<\/b>/);
+    assert.match(bot.answers[0] ?? '', /Service tier: Flex/);
+  });
+});
+
+test('/fast sets service tier for the next turn', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+
+    await composition.telegramRouter.handleCommand({ scopeId: 'chat-1' } as any, 'en', 'fast', []);
+
+    assert.equal(store.getChatSettings('chat-1')?.serviceTier, 'fast');
+    assert.match(bot.messages.at(-1) ?? '', /Configured service tier: Fast/);
+  });
+});
+
+test('service tier changes are blocked while a turn is active', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+    composition.activeTurns.set('turn-1', { turnId: 'turn-1', scopeId: 'chat-1' } as any);
+
+    await composition.telegramRouter.handleCommand({ scopeId: 'chat-1' } as any, 'en', 'tier', ['flex']);
+
+    assert.equal(store.getChatSettings('chat-1')?.serviceTier, null);
+    assert.match(bot.messages.at(-1) ?? '', /Cannot change service tier while a turn is active/);
   });
 });

@@ -140,6 +140,7 @@ function makeApp() {
         model: 'gpt-5',
         modelProvider: 'openai',
         reasoningEffort: 'medium',
+        serviceTier: null,
         cwd: '/tmp/demo',
       };
     },

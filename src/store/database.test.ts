@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BridgeStore } from './database.js';
+import { openSqliteDatabase } from './sqlite.js';
 
 function withStore(run: (store: BridgeStore) => void): void {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-'));
@@ -217,6 +218,7 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: 'o3',
       reasoningEffort: 'high',
+      serviceTier: null,
       locale: null,
       accessPreset: null,
       collaborationMode: null,
@@ -231,6 +233,7 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: null,
       reasoningEffort: 'medium',
+      serviceTier: null,
       locale: null,
       accessPreset: null,
       collaborationMode: null,
@@ -245,6 +248,7 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: null,
       reasoningEffort: 'medium',
+      serviceTier: null,
       locale: 'zh',
       accessPreset: null,
       collaborationMode: null,
@@ -259,6 +263,7 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: null,
       reasoningEffort: 'medium',
+      serviceTier: null,
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: null,
@@ -273,6 +278,22 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: null,
       reasoningEffort: 'medium',
+      serviceTier: null,
+      locale: 'zh',
+      accessPreset: 'full-access',
+      collaborationMode: 'plan',
+      confirmPlanBeforeExecute: true,
+      autoQueueMessages: true,
+      persistPlanHistory: true,
+      updatedAt: store.getChatSettings('chat-3')!.updatedAt,
+    });
+
+    store.setChatServiceTier('chat-3', 'fast');
+    assert.deepEqual(store.getChatSettings('chat-3'), {
+      chatId: 'chat-3',
+      model: null,
+      reasoningEffort: 'medium',
+      serviceTier: 'fast',
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
@@ -290,6 +311,7 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: null,
       reasoningEffort: 'medium',
+      serviceTier: 'fast',
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
@@ -304,6 +326,7 @@ test('BridgeStore persists chat session settings', () => {
       chatId: 'chat-3',
       model: 'o3',
       reasoningEffort: 'low',
+      serviceTier: 'fast',
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
@@ -313,6 +336,41 @@ test('BridgeStore persists chat session settings', () => {
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
   });
+});
+
+test('BridgeStore migrates chat settings to add service tier', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-migrate-'));
+  const dbPath = path.join(tmpDir, 'bridge.sqlite');
+  const db = openSqliteDatabase(dbPath);
+  db.exec(`
+    CREATE TABLE chat_settings (
+      chat_id TEXT PRIMARY KEY,
+      model TEXT,
+      reasoning_effort TEXT,
+      locale TEXT,
+      access_preset TEXT,
+      collaboration_mode TEXT,
+      confirm_plan_before_execute INTEGER NOT NULL DEFAULT 1,
+      auto_queue_messages INTEGER NOT NULL DEFAULT 1,
+      persist_plan_history INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL
+    );
+    INSERT INTO chat_settings (
+      chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode,
+      confirm_plan_before_execute, auto_queue_messages, persist_plan_history, updated_at
+    ) VALUES ('chat-old', 'gpt-5', 'medium', 'en', NULL, 'plan', 1, 1, 1, 123);
+  `);
+  db.close();
+
+  const store = new BridgeStore(dbPath);
+  try {
+    assert.equal(store.getChatSettings('chat-old')?.serviceTier, null);
+    store.setChatServiceTier('chat-old', 'flex');
+    assert.equal(store.getChatSettings('chat-old')?.serviceTier, 'flex');
+  } finally {
+    store.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('BridgeStore persists guided plan sessions, snapshots, queue, and prompt message history', () => {

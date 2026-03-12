@@ -3,7 +3,13 @@ import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AccountRateLimitSnapshot, AppLocale } from '../types.js';
-import { formatAccessPresetLabel, formatApprovalPolicyLabel, formatCollaborationModeLabel, formatSandboxModeLabel } from './presentation.js';
+import {
+  formatAccessPresetLabel,
+  formatApprovalPolicyLabel,
+  formatCollaborationModeLabel,
+  formatSandboxModeLabel,
+  formatServiceTierLabel,
+} from './presentation.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
 
 interface StatusCommandHost {
@@ -36,6 +42,7 @@ export class StatusCommandCoordinator {
       t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
       t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
       t(locale, 'status_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
       ...formatRateLimitStatusLines(locale, rateLimits),
       t(locale, 'status_confirm_plan_before_execute', {

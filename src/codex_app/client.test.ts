@@ -38,12 +38,14 @@ test('startTurn sends plan collaboration instructions with recommended-option gu
     sandboxMode: 'workspace-write',
     cwd: '/tmp/demo',
     model: 'gpt-5',
+    serviceTier: 'fast',
     effort: 'medium',
     collaborationMode: 'plan',
     developerInstructions: null,
   });
 
   assert.equal(capturedMethod, 'turn/start');
+  assert.equal(capturedParams?.serviceTier, 'fast');
   assert.equal(capturedParams?.collaborationMode?.mode, 'plan');
   assert.equal(
     capturedParams?.collaborationMode?.settings?.developer_instructions,
@@ -70,6 +72,7 @@ test('startTurn allows plan developer instructions to be overridden per turn', a
     sandboxMode: 'workspace-write',
     cwd: '/tmp/demo',
     model: 'gpt-5',
+    serviceTier: null,
     effort: 'medium',
     collaborationMode: 'plan',
     developerInstructions: 'Execute only after the user confirms.',
@@ -79,6 +82,44 @@ test('startTurn allows plan developer instructions to be overridden per turn', a
     capturedParams?.collaborationMode?.settings?.developer_instructions,
     'Execute only after the user confirms.',
   );
+});
+
+test('startThread forwards service tier and maps it back from the session response', async () => {
+  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
+  let capturedMethod = '';
+  let capturedParams: any = null;
+  (client as any).request = async (method: string, params: any) => {
+    capturedMethod = method;
+    capturedParams = params;
+    return {
+      thread: {
+        id: 'thread-1',
+        name: 'Demo',
+        preview: 'Preview',
+        cwd: '/tmp/demo',
+        modelProvider: 'openai',
+        status: { type: 'idle' },
+        updatedAt: 123,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      serviceTier: 'flex',
+      reasoningEffort: 'medium',
+      cwd: '/tmp/demo',
+    };
+  };
+
+  const session = await client.startThread({
+    cwd: '/tmp/demo',
+    approvalPolicy: 'never',
+    sandboxMode: 'workspace-write',
+    model: 'gpt-5',
+    serviceTier: 'fast',
+  });
+
+  assert.equal(capturedMethod, 'thread/start');
+  assert.equal(capturedParams?.serviceTier, 'fast');
+  assert.equal(session.serviceTier, 'flex');
 });
 
 test('renameThread calls thread/name/set with threadId and name', async () => {

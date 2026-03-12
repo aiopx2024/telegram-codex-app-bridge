@@ -16,6 +16,7 @@ import type { ThreadSessionService } from './thread_session.js';
 import type { StatusCommandCoordinator } from './status_command.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
 import { isThreadNotFoundError } from './utils.js';
+import { formatServiceTierLabel } from './presentation.js';
 
 interface TelegramIngressHost {
   config: AppConfig;
@@ -55,6 +56,8 @@ export class TelegramIngressRouter {
       new: (event, locale, args) => this.handleNewCommand(event.scopeId, locale, args),
       model: (event, locale, args) => this.host.settings.handleModelCommand(event, locale, args),
       models: (event, locale) => this.host.settings.showModelSettingsPanel(event.scopeId, undefined, locale),
+      tier: (event, locale, args) => this.host.settings.handleTierCommand(event, locale, args),
+      fast: (event, locale, args) => this.host.settings.handleFastCommand(event, locale, args),
       mode: (event, locale, args) => this.host.settings.handleModeCommand(event, locale, args),
       settings: (event, locale) => this.host.settings.showSettingsHomePanel(event.scopeId, undefined, locale),
       queue: (event, locale, args) => this.host.queue.handleQueueCommand(event, locale, args),
@@ -102,10 +105,10 @@ export class TelegramIngressRouter {
         ),
       },
       {
-        pattern: /^settings:(model|effort|mode|access):(.+)$/,
+        pattern: /^settings:(model|effort|tier|mode|access):(.+)$/,
         handle: (event, match, locale) => this.host.settings.handleSettingsCallback(
           event,
-          match[1]! as 'model' | 'effort' | 'mode' | 'access',
+          match[1]! as 'model' | 'effort' | 'tier' | 'mode' | 'access',
           match[2]!,
           locale,
         ),
@@ -252,6 +255,8 @@ export class TelegramIngressRouter {
       '/open <n>',
       '/new [cwd]',
       '/models',
+      '/tier [auto|fast|flex]',
+      '/fast [off|flex]',
       '/mode',
       '/settings',
       '/queue',
@@ -291,6 +296,7 @@ export class TelegramIngressRouter {
       t(locale, 'line_title', { value: thread.name || thread.preview || t(locale, 'empty') }),
       t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
       t(locale, 'line_cwd', { value: binding.cwd ?? this.host.config.defaultCwd }),
     ];
     if (this.host.config.codexAppSyncOnOpen) {
@@ -310,6 +316,7 @@ export class TelegramIngressRouter {
       t(locale, 'line_cwd', { value: binding.cwd ?? cwd }),
       t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
     ].join('\n'));
   }
 

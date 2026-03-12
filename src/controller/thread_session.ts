@@ -19,6 +19,7 @@ import type {
   CollaborationModeValue,
   ReasoningEffortValue,
   SandboxModeValue,
+  ServiceTierValue,
   ThreadBinding,
   ThreadSessionState,
 } from '../types.js';
@@ -63,6 +64,7 @@ export class ThreadSessionService {
       approvalPolicy: access.approvalPolicy,
       sandboxMode: access.sandboxMode,
       model: settings?.model ?? null,
+      serviceTier: settings?.serviceTier ?? null,
     });
     return this.storeThreadSession(scopeId, session, 'seed');
   }
@@ -85,6 +87,7 @@ export class ThreadSessionService {
         sandboxMode: effectiveAccess.sandboxMode,
         cwd: binding.cwd ?? this.host.config.defaultCwd,
         model: turnConfig.model,
+        serviceTier: turnConfig.serviceTier,
         effort: turnConfig.effort,
         collaborationMode: turnConfig.collaborationMode,
         developerInstructions: options.developerInstructions ?? null,
@@ -111,6 +114,7 @@ export class ThreadSessionService {
         sandboxMode: fallbackAccess.sandboxMode,
         cwd: replacement.cwd ?? this.host.config.defaultCwd,
         model: nextTurnConfig.model,
+        serviceTier: nextTurnConfig.serviceTier,
         effort: nextTurnConfig.effort,
         collaborationMode: nextTurnConfig.collaborationMode,
         developerInstructions: options.developerInstructions ?? null,
@@ -236,6 +240,7 @@ export class ThreadSessionService {
     const current = this.host.store.getChatSettings(scopeId);
     const preserveDefaultModel = current !== null && current.model === null;
     const preserveDefaultEffort = current !== null && current.reasoningEffort === null;
+    const preserveDefaultServiceTier = current !== null && current.serviceTier === null;
     this.host.store.setChatSettings(
       scopeId,
       preserveDefaultModel
@@ -251,6 +256,16 @@ export class ThreadSessionService {
             ? null
             : String(params.reasoning_effort) as ReasoningEffortValue,
     );
+    this.host.store.setChatServiceTier(
+      scopeId,
+      preserveDefaultServiceTier
+        ? null
+        : params.service_tier === undefined && params.serviceTier === undefined
+          ? current?.serviceTier ?? null
+          : params.service_tier === null || params.serviceTier === null
+            ? null
+            : String(params.service_tier ?? params.serviceTier) as ServiceTierValue,
+    );
     this.host.updateStatus();
   }
 
@@ -263,6 +278,9 @@ export class ThreadSessionService {
     const effort = syncMode === 'seed'
       ? hasExisting ? existing.reasoningEffort : session.reasoningEffort
       : session.reasoningEffort;
+    const serviceTier = syncMode === 'seed'
+      ? hasExisting ? existing.serviceTier : session.serviceTier
+      : session.serviceTier;
     const normalized: ThreadBinding = {
       chatId: scopeId,
       threadId: session.thread.threadId,
@@ -271,6 +289,7 @@ export class ThreadSessionService {
     };
     this.host.store.setBinding(scopeId, normalized.threadId, normalized.cwd);
     this.host.store.setChatSettings(scopeId, model, effort);
+    this.host.store.setChatServiceTier(scopeId, serviceTier);
     this.host.attachedThreads.add(normalized.threadId);
     this.host.updateStatus();
     return normalized;
@@ -280,8 +299,14 @@ export class ThreadSessionService {
     scopeId: string,
     settings = this.host.store.getChatSettings(scopeId),
     collaborationModeOverride?: CollaborationModeValue | null,
-  ): Promise<{ model: string | null; effort: ReasoningEffortValue | null; collaborationMode: CollaborationModeValue | null }> {
+  ): Promise<{
+    model: string | null;
+    serviceTier: ServiceTierValue | null;
+    effort: ReasoningEffortValue | null;
+    collaborationMode: CollaborationModeValue | null;
+  }> {
     let model = settings?.model ?? null;
+    const serviceTier = settings?.serviceTier ?? null;
     const effort = settings?.reasoningEffort ?? null;
     const collaborationMode = collaborationModeOverride === undefined
       ? settings?.collaborationMode ?? null
@@ -290,7 +315,7 @@ export class ThreadSessionService {
       const models = await this.host.app.listModels();
       model = resolveCurrentModel(models, null)?.model ?? null;
     }
-    return { model, effort, collaborationMode };
+    return { model, serviceTier, effort, collaborationMode };
   }
 
   private async stageAttachments(

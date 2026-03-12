@@ -116,6 +116,7 @@ function makeApp(tempDir: string) {
         model: 'gpt-5',
         modelProvider: 'openai',
         reasoningEffort: 'medium',
+        serviceTier: null,
         cwd: tempDir,
       };
     },
@@ -164,6 +165,7 @@ test('controller.start restores plan confirmation prompts after restart', async 
 test('controller.start automatically resumes queued inputs when nothing blocks them', async () => {
   await withController(async (controller, store, _bot, app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+    store.setChatServiceTier('chat-1', 'fast');
     store.setBinding('chat-1', 'thread-1', tempDir);
     store.saveQueuedTurnInput({
       queueId: 'queue-1',
@@ -182,6 +184,7 @@ test('controller.start automatically resumes queued inputs when nothing blocks t
 
     assert.equal(app.startTurnCalls.length, 1);
     assert.equal(app.startTurnCalls[0]?.input?.[0]?.text, 'Resume me');
+    assert.equal(app.startTurnCalls[0]?.serviceTier, 'fast');
     assert.equal(store.getQueuedTurnInput('queue-1')?.status, 'processing');
   });
 });

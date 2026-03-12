@@ -7,7 +7,7 @@ Use a Telegram bot to control a local Codex host through `codex app-server`.
 - Telegram private chat or topic-aware group control for a single allowed user
 - Local `codex app-server` transport over loopback WebSocket
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
-- Chat-scoped model and reasoning-effort control with `/models` and optional `/model`/`/effort` aliases
+- Chat-scoped model, service-tier, and reasoning-effort control with `/models` and optional `/model`/`/tier`/`/fast`/`/effort` aliases
 - Chat-scoped conversation mode control with `/mode` and optional `/plan` alias
 - Chat-scoped access presets with `/permissions` and optional `/access` alias
 - Unified `/settings` home for model, mode, access, queue, and plan-history controls
@@ -161,12 +161,14 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/threads [query]`
 - `/open <n>`
 - `/new [cwd]`
-- `/models` opens the model and reasoning picker
+- `/models` opens the model, service-tier, and reasoning picker
+- `/tier` opens or sets the service tier (`auto`, `fast`, `flex`)
+- `/fast` is a shortcut for setting the service tier to `fast`
 - `/mode` opens the conversation-mode picker (`default`, `plan`)
 - `/settings` opens the unified settings home
 - `/queue [next|clear]` shows or trims queued follow-up messages
 - `/permissions` opens the access preset picker (`read-only`, `default`, `full-access`)
-- `/model` and `/effort` are compatibility aliases for the same picker
+- `/model`, `/tier`, `/fast`, and `/effort` are compatibility aliases for the same picker
 - `/plan` is a compatibility alias for switching to plan mode
 - `/access` is a compatibility alias for `/permissions`
 - `/reveal`

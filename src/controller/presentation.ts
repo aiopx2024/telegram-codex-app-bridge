@@ -10,6 +10,7 @@ import type {
   ModelInfo,
   ReasoningEffortValue,
   SandboxModeValue,
+  ServiceTierValue,
 } from '../types.js';
 import type { ResolvedAccessMode } from './access.js';
 
@@ -116,6 +117,7 @@ export function formatWhereMessage(
     t(locale, 'where_preview', { value: thread.preview || t(locale, 'empty') }),
     t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
     t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+    t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
     t(locale, 'where_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
     t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
     t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
@@ -160,6 +162,7 @@ export function formatSettingsHomeMessage(
     '',
     t(locale, 'status_configured_model', { value: escapeTelegramHtml(state.settings?.model ?? t(locale, 'server_default')) }),
     t(locale, 'status_configured_effort', { value: escapeTelegramHtml(state.settings?.reasoningEffort ?? t(locale, 'server_default')) }),
+    t(locale, 'status_configured_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, state.settings?.serviceTier ?? null)) }),
     t(locale, 'status_mode', { value: escapeTelegramHtml(formatCollaborationModeLabel(locale, state.settings?.collaborationMode ?? null)) }),
     t(locale, 'status_access_preset', { value: escapeTelegramHtml(formatAccessPresetLabel(locale, state.access.preset)) }),
     t(locale, 'settings_plan_gate', {
@@ -238,6 +241,7 @@ export function formatModelSettingsMessage(
   const selectedModel = resolveCurrentModel(models, settings?.model ?? null);
   const selectedModelLabel = settings?.model ?? t(locale, 'server_default');
   const selectedEffort = settings?.reasoningEffort ?? null;
+  const selectedServiceTier = settings?.serviceTier ?? null;
   const supportedEfforts = selectedModel?.supportedReasoningEfforts.length
     ? selectedModel.supportedReasoningEfforts
     : selectedModel
@@ -250,6 +254,7 @@ export function formatModelSettingsMessage(
     '',
     t(locale, 'models_model', { value: escapeTelegramHtml(selectedModelLabel) }),
     t(locale, 'models_effort', { value: escapeTelegramHtml(selectedEffort ?? t(locale, 'server_default')) }),
+    t(locale, 'models_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, selectedServiceTier)) }),
     selectedModel ? t(locale, 'models_current_default_target', { value: escapeTelegramHtml(selectedModel.model) }) : null,
     supportedEfforts.length > 0
       ? t(locale, 'models_supported_efforts', { value: escapeTelegramHtml(supportedEfforts.join(', ')) })
@@ -291,10 +296,25 @@ export function buildModelSettingsKeyboard(
       callback_data: `settings:effort:${effort}`,
     })),
   ];
+  const serviceTierButtons: InlineButton[] = [
+    {
+      text: settings?.serviceTier === null ? `• ${t(locale, 'button_auto')}` : t(locale, 'button_auto'),
+      callback_data: 'settings:tier:default',
+    },
+    {
+      text: `${settings?.serviceTier === 'fast' ? '• ' : ''}${t(locale, 'service_tier_fast')}`,
+      callback_data: 'settings:tier:fast',
+    },
+    {
+      text: `${settings?.serviceTier === 'flex' ? '• ' : ''}${t(locale, 'service_tier_flex')}`,
+      callback_data: 'settings:tier:flex',
+    },
+  ];
 
   return [
     ...chunkButtons(modelButtons, 2),
     ...chunkButtons(effortButtons, 3),
+    serviceTierButtons,
     [{
       text: t(locale, 'button_settings_home'),
       callback_data: 'settings:home',
@@ -362,6 +382,20 @@ export function normalizeRequestedEffort(value: string): ReasoningEffortValue | 
   return null;
 }
 
+export function normalizeRequestedServiceTier(value: string): ServiceTierValue | null | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized === 'auto' || normalized === 'default' || normalized === 'reset' || normalized === 'off') {
+    return null;
+  }
+  if (normalized === 'fast' || normalized === 'on') {
+    return 'fast';
+  }
+  if (normalized === 'flex') {
+    return 'flex';
+  }
+  return undefined;
+}
+
 export function clampEffortToModel(
   model: ModelInfo | null,
   effort: ReasoningEffortValue | null,
@@ -391,6 +425,12 @@ export function formatApprovalPolicyLabel(locale: AppLocale, policy: ApprovalPol
 export function formatCollaborationModeLabel(locale: AppLocale, mode: CollaborationModeValue | null): string {
   if (mode === 'plan') return t(locale, 'mode_plan');
   return t(locale, 'mode_default');
+}
+
+export function formatServiceTierLabel(locale: AppLocale, tier: ServiceTierValue | null): string {
+  if (tier === 'fast') return t(locale, 'service_tier_fast');
+  if (tier === 'flex') return t(locale, 'service_tier_flex');
+  return t(locale, 'server_default');
 }
 
 export function formatSandboxModeLabel(locale: AppLocale, mode: SandboxModeValue): string {

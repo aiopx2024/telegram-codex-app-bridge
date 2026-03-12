@@ -10,6 +10,7 @@ export type ApprovalPolicyValue = 'on-request' | 'on-failure' | 'never' | 'untru
 export type SandboxModeValue = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type AccessPresetValue = 'read-only' | 'default' | 'full-access';
 export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ServiceTierValue = 'fast' | 'flex';
 export type CollaborationModeValue = 'default' | 'plan';
 export type ThreadStatusKind = 'active' | 'idle' | 'notLoaded' | 'systemError';
 export type ApprovalRiskLevel = 'low' | 'medium' | 'high';
@@ -43,6 +44,7 @@ export interface ChatSessionSettings extends GuidedPlanPreferences {
   chatId: string;
   model: string | null;
   reasoningEffort: ReasoningEffortValue | null;
+  serviceTier: ServiceTierValue | null;
   locale: AppLocale | null;
   accessPreset: AccessPresetValue | null;
   collaborationMode: CollaborationModeValue | null;
@@ -93,6 +95,7 @@ export interface ThreadSessionState {
   model: string;
   modelProvider: string;
   reasoningEffort: ReasoningEffortValue | null;
+  serviceTier: ServiceTierValue | null;
   cwd: string;
 }
 

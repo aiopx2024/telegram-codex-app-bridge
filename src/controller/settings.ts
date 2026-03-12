@@ -3,7 +3,7 @@ import type { CodexAppClient } from '../codex_app/client.js';
 import { t } from '../i18n.js';
 import type { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
-import type { AppLocale, ModelInfo } from '../types.js';
+import type { AppLocale, ModelInfo, ServiceTierValue } from '../types.js';
 import { normalizeAccessPreset, resolveAccessMode, type ResolvedAccessMode } from './access.js';
 import {
   buildAccessSettingsKeyboard,
@@ -17,10 +17,12 @@ import {
   formatCollaborationModeLabel,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
+  formatServiceTierLabel,
   formatSettingsHomeMessage,
   formatSandboxModeLabel,
   formatWhereMessage,
   normalizeRequestedEffort,
+  normalizeRequestedServiceTier,
   resolveCurrentModel,
   resolveRequestedModel,
 } from './presentation.js';
@@ -195,14 +197,47 @@ export class SettingsCoordinator {
     ].join('\n'));
   }
 
+  async handleTierCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
+    if (args.length === 0) {
+      await this.showModelSettingsPanel(scopeId, undefined, locale);
+      return;
+    }
+    if (this.host.turns.findByScope(scopeId)) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'tier_change_blocked'));
+      return;
+    }
+    const nextTier = normalizeRequestedServiceTier(args.join(' '));
+    if (nextTier === undefined) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'usage_tier'));
+      return;
+    }
+    await this.applyServiceTier(scopeId, nextTier, locale);
+  }
+
+  async handleFastCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
+    if (this.host.turns.findByScope(scopeId)) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'tier_change_blocked'));
+      return;
+    }
+    const normalized = args.join(' ').trim().toLowerCase();
+    const nextTier = !normalized ? 'fast' : normalizeRequestedServiceTier(normalized);
+    if (nextTier === undefined) {
+      await this.showModelSettingsPanel(scopeId, undefined, locale);
+      return;
+    }
+    await this.applyServiceTier(scopeId, nextTier === null && !normalized ? 'fast' : nextTier, locale);
+  }
+
   async handleSettingsCallback(
     event: TelegramCallbackEvent,
-    kind: 'model' | 'effort' | 'mode' | 'access',
+    kind: 'model' | 'effort' | 'tier' | 'mode' | 'access',
     rawValue: string,
     locale: AppLocale,
   ): Promise<void> {
     const scopeId = event.scopeId;
-    if ((kind === 'model' || kind === 'effort') && this.host.turns.findByScope(scopeId)) {
+    if ((kind === 'model' || kind === 'effort' || kind === 'tier') && this.host.turns.findByScope(scopeId)) {
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
       return;
     }
@@ -235,6 +270,19 @@ export class SettingsCoordinator {
       this.host.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
       await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'callback_model', { model: selected.model }));
+      return;
+    }
+    if (kind === 'tier') {
+      const nextTier = normalizeRequestedServiceTier(value);
+      if (nextTier === undefined) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      this.host.store.setChatServiceTier(scopeId, nextTier);
+      await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
+      await this.host.answerCallback(event.callbackQueryId, nextTier === null
+        ? t(locale, 'using_default_service_tier')
+        : t(locale, 'callback_service_tier', { value: formatServiceTierLabel(locale, nextTier) }));
       return;
     }
     if (value === 'default') {
@@ -333,6 +381,7 @@ export class SettingsCoordinator {
         t(locale, 'where_no_thread_bound'),
         t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
         t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+        t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
         t(locale, 'where_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
         t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
         t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
@@ -450,6 +499,17 @@ export class SettingsCoordinator {
     await this.host.answerCallback(event.callbackQueryId, t(locale, 'callback_mode', {
       value: formatCollaborationModeLabel(locale, nextMode),
     }));
+  }
+
+  private async applyServiceTier(scopeId: string, serviceTier: ServiceTierValue | null, locale: AppLocale): Promise<void> {
+    this.host.store.setChatServiceTier(scopeId, serviceTier);
+    await this.host.messages.sendMessage(scopeId, [
+      serviceTier === null
+        ? t(locale, 'service_tier_reset')
+        : t(locale, 'service_tier_configured', { value: formatServiceTierLabel(locale, serviceTier) }),
+      t(locale, 'applies_next_turn'),
+      t(locale, 'tip_use_models'),
+    ].join('\n'));
   }
 
   private async refreshModelSettingsPanel(scopeId: string, messageId: number, locale: AppLocale, models?: ModelInfo[]): Promise<void> {

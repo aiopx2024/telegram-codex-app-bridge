@@ -15,6 +15,7 @@ import type {
   RateLimitWindow,
   ReasoningEffortValue,
   SandboxModeValue,
+  ServiceTierValue,
   ThreadSessionState,
   ThreadStatusKind,
 } from '../types.js';
@@ -48,6 +49,7 @@ interface StartThreadOptions {
   approvalPolicy: string;
   sandboxMode: SandboxModeValue;
   model: string | null;
+  serviceTier: ServiceTierValue | null;
 }
 
 interface ResumeThreadOptions {
@@ -74,6 +76,7 @@ interface StartTurnOptions {
   sandboxMode: SandboxModeValue;
   cwd: string | null;
   model: string | null;
+  serviceTier: ServiceTierValue | null;
   effort: ReasoningEffortValue | null;
   collaborationMode: CollaborationModeValue | null;
   developerInstructions: string | null;
@@ -174,6 +177,7 @@ export class CodexAppClient extends EventEmitter {
       approvalPolicy: options.approvalPolicy,
       model: options.model,
       modelProvider: null,
+      serviceTier: options.serviceTier,
       sandbox: options.sandboxMode,
       config: null,
       serviceName: null,
@@ -213,6 +217,7 @@ export class CodexAppClient extends EventEmitter {
       approvalPolicy: options.approvalPolicy,
       sandboxPolicy: mapSandboxPolicy(options.sandboxMode),
       model: options.model,
+      serviceTier: options.serviceTier,
       effort: options.effort,
       summary: null,
       personality: null,
@@ -511,6 +516,7 @@ function mapThreadSessionState(raw: any): ThreadSessionState {
     thread: mapThread(raw.thread),
     model: String(raw.model),
     modelProvider: String(raw.modelProvider),
+    serviceTier: raw.serviceTier === null ? null : String(raw.serviceTier) as ServiceTierValue,
     reasoningEffort: raw.reasoningEffort === null ? null : String(raw.reasoningEffort) as ReasoningEffortValue,
     cwd: String(raw.cwd),
   };

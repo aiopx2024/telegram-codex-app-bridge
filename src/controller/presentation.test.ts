@@ -13,11 +13,13 @@ import {
   formatCollaborationModeLabel,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
+  formatServiceTierLabel,
   formatSettingsHomeMessage,
   formatThreadHistoryPreviewMessage,
   formatSandboxModeLabel,
   formatThreadsMessage,
   normalizeRequestedEffort,
+  normalizeRequestedServiceTier,
   resolveRequestedModel,
 } from './presentation.js';
 import type { AppThread, ChatSessionSettings, ModelInfo } from '../types.js';
@@ -127,6 +129,7 @@ test('formatModelSettingsMessage renders current selections', () => {
     chatId: 'chat-1',
     model: 'o3',
     reasoningEffort: 'high',
+    serviceTier: 'fast',
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
@@ -140,6 +143,7 @@ test('formatModelSettingsMessage renders current selections', () => {
   assert.match(rendered, /<b>Model settings<\/b>/);
   assert.match(rendered, /Model: <b>o3<\/b>/);
   assert.match(rendered, /Effort: <b>high<\/b>/);
+  assert.match(rendered, /Service tier: <b>Fast<\/b>/);
   assert.match(rendered, /Supported efforts: <code>medium, high<\/code>/);
 });
 
@@ -168,6 +172,7 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
     chatId: 'chat-1',
     model: 'o3',
     reasoningEffort: 'high',
+    serviceTier: 'flex',
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
@@ -185,7 +190,12 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
   assert.deepEqual(keyboard[1], [
     { text: 'o4-mini', callback_data: 'settings:model:o4-mini' },
   ]);
-  assert.equal(keyboard.at(-2)?.at(-1)?.text, '• high');
+  assert.equal(keyboard.at(-3)?.at(-1)?.text, '• high');
+  assert.deepEqual(keyboard.at(-2), [
+    { text: 'Auto', callback_data: 'settings:tier:default' },
+    { text: 'Fast', callback_data: 'settings:tier:fast' },
+    { text: '• Flex', callback_data: 'settings:tier:flex' },
+  ]);
   assert.equal(keyboard.at(-1)?.[0]?.text, 'Settings');
 });
 
@@ -233,6 +243,14 @@ test('normalizeRequestedEffort validates allowed effort names', () => {
   assert.equal(normalizeRequestedEffort('invalid'), null);
 });
 
+test('service tier helpers normalize and format values', () => {
+  assert.equal(normalizeRequestedServiceTier('FAST'), 'fast');
+  assert.equal(normalizeRequestedServiceTier('auto'), null);
+  assert.equal(normalizeRequestedServiceTier('invalid'), undefined);
+  assert.equal(formatServiceTierLabel('zh', 'flex'), '弹性');
+  assert.equal(formatServiceTierLabel('en', null), 'server default');
+});
+
 test('access presentation renders current preset and marks selected option', () => {
   const access = {
     preset: 'full-access' as const,
@@ -266,6 +284,7 @@ test('mode presentation renders and marks selected option', () => {
     chatId: 'chat-mode',
     model: null,
     reasoningEffort: null,
+    serviceTier: null,
     locale: 'en',
     accessPreset: null,
     collaborationMode: 'plan',
@@ -290,6 +309,7 @@ test('settings home presentation summarizes session state and exposes toggles', 
     chatId: 'chat-settings',
     model: 'gpt-5',
     reasoningEffort: 'medium',
+    serviceTier: 'fast',
     locale: 'en',
     accessPreset: 'default',
     collaborationMode: 'plan',
@@ -317,6 +337,7 @@ test('settings home presentation summarizes session state and exposes toggles', 
   assert.match(rendered, /<b>Settings<\/b>/);
   assert.match(rendered, /Thread: <b>thread-1<\/b>/);
   assert.match(rendered, /Queue depth: <b>2<\/b>/);
+  assert.match(rendered, /Configured service tier: Fast/);
   assert.match(rendered, /Plan confirmation gate: yes/);
   assert.equal(keyboard[0]?.[0]?.text, 'Models');
   assert.equal(keyboard[1]?.[0]?.callback_data, 'settings:plan-gate:off');
@@ -355,6 +376,7 @@ test('presentation renders chinese locale strings', () => {
     chatId: 'chat-zh',
     model: null,
     reasoningEffort: null,
+    serviceTier: null,
     locale: 'zh',
     accessPreset: null,
     collaborationMode: null,
@@ -367,4 +389,5 @@ test('presentation renders chinese locale strings', () => {
   assert.match(renderedModels, /<b>模型设置<\/b>/);
   assert.match(renderedModels, /模型：<b>服务端默认<\/b>/);
   assert.match(renderedModels, /推理强度：<b>服务端默认<\/b>/);
+  assert.match(renderedModels, /服务档位：<b>服务端默认<\/b>/);
 });
