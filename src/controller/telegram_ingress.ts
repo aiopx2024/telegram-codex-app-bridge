@@ -11,6 +11,7 @@ import type { GuidedPlanCoordinator, PlanRecoveryAction, PlanSessionAction } fro
 import type { ThreadPanelCoordinator } from './thread_panel.js';
 import type { TurnQueueCoordinator } from './turn_queue.js';
 import type { TurnExecutionCoordinator } from './turn_execution.js';
+import type { TurnGuidanceCoordinator } from './turn_guidance.js';
 import type { SettingsCoordinator } from './settings.js';
 import type { ThreadSessionService } from './thread_session.js';
 import type { StatusCommandCoordinator } from './status_command.js';
@@ -27,6 +28,7 @@ interface TelegramIngressHost {
   threadPanels: ThreadPanelCoordinator;
   queue: TurnQueueCoordinator;
   turnExecution: TurnExecutionCoordinator;
+  turnGuidance: TurnGuidanceCoordinator;
   settings: SettingsCoordinator;
   sessions: ThreadSessionService;
   statusCommand: StatusCommandCoordinator;
@@ -61,6 +63,7 @@ export class TelegramIngressRouter {
       mode: (event, locale, args) => this.host.settings.handleModeCommand(event, locale, args),
       settings: (event, locale) => this.host.settings.showSettingsHomePanel(event.scopeId, undefined, locale),
       queue: (event, locale, args) => this.host.queue.handleQueueCommand(event, locale, args),
+      guide: (event, locale, args) => this.host.turnGuidance.handleGuideCommand(event, locale, args),
       permissions: (event, locale) => this.host.settings.showAccessSettingsPanel(event.scopeId, undefined, locale),
       access: (event, locale) => this.host.settings.showAccessSettingsPanel(event.scopeId, undefined, locale),
       plan: (event, locale, args) => this.host.settings.handlePlanAliasCommand(event, locale, args),
@@ -128,6 +131,15 @@ export class TelegramIngressRouter {
           event,
           match[1]!,
           match[2]! as PlanRecoveryAction,
+          locale,
+        ),
+      },
+      {
+        pattern: /^guidance:([a-f0-9]+):(steer|keep)$/,
+        handle: (event, match, locale) => this.host.turnGuidance.handleQueuedGuidanceCallback(
+          event,
+          match[1]!,
+          match[2]! as 'steer' | 'keep',
           locale,
         ),
       },
@@ -202,11 +214,12 @@ export class TelegramIngressRouter {
         return;
       }
       await this.host.messages.sendTyping(scopeId);
-      await this.host.queue.enqueueTurnInput(
+      const queuedRecord = await this.host.queue.enqueueTurnInput(
         this.host.sessions.resolveActiveTurnBinding(scopeId, activeTurn),
         { ...event, text: decision.text },
         locale,
       );
+      await this.host.turnGuidance.maybeOfferQueuedGuidancePrompt(queuedRecord, activeTurn.turnId, locale);
       return;
     }
 
@@ -260,6 +273,7 @@ export class TelegramIngressRouter {
       '/mode',
       '/settings',
       '/queue',
+      '/guide <text>',
       '/permissions',
       '/reveal',
       '/where',

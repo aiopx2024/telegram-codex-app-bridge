@@ -167,6 +167,7 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/mode` opens the conversation-mode picker (`default`, `plan`)
 - `/settings` opens the unified settings home
 - `/queue [next|clear]` shows or trims queued follow-up messages
+- `/guide <text>` inserts extra guidance into the currently running reply
 - `/permissions` opens the access preset picker (`read-only`, `default`, `full-access`)
 - `/model`, `/tier`, `/fast`, and `/effort` are compatibility aliases for the same picker
 - `/plan` is a compatibility alias for switching to plan mode
@@ -176,6 +177,7 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/interrupt`
 - Plain text sends to the current thread, or creates a new one if none is bound.
 - When a turn is already running and auto-queue is enabled, the new message is normalized, queued, and resumed automatically in FIFO order.
+- Busy-turn follow-ups default to queueing, then briefly offer an `Insert Now` choice that converts that queued item into in-flight guidance for the current reply.
 
 ## Guided Plan Flow
 
@@ -228,6 +230,7 @@ What is intentionally supported now:
 - Tool actions such as `Read ...`, `Searched for ...`, `Ran ...`, and edit operations are summarized separately from the assistant body
 - Guided plan mode can hold execution behind a confirm/revise gate, render live plan updates, pause on interactive questions, and resume after restart
 - Follow-up messages can queue behind an active turn instead of being dropped
+- Queued follow-ups can be converted into in-flight guidance for the active turn without interrupting Codex
 - Approval cards can expand into a detail view with risk and path summaries
 - Interrupt and approval states are shown as their own activity states instead of being mixed into generic "working" text
 

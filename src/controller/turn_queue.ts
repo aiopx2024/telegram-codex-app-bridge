@@ -34,6 +34,7 @@ interface TurnQueueHost {
     options?: { queuedInputId?: string | null },
   ) => Promise<void>;
   answerCallback: (callbackQueryId: string, text: string) => Promise<void>;
+  dismissQueuedGuidancePrompt: (queueId: string) => Promise<void>;
 }
 
 export class TurnQueueCoordinator {
@@ -43,7 +44,7 @@ export class TurnQueueCoordinator {
     binding: ThreadBinding,
     event: TelegramTextEvent,
     locale: AppLocale,
-  ): Promise<void> {
+  ): Promise<QueuedTurnInputRecord> {
     const input = await this.host.buildTurnInput(binding, event, locale);
     const queueId = crypto.randomBytes(8).toString('hex');
     const now = Date.now();
@@ -68,13 +69,28 @@ export class TurnQueueCoordinator {
     );
     const current = this.host.store.getQueuedTurnInput(queueId);
     if (current) {
-      this.host.store.saveQueuedTurnInput({
+      const updated = {
         ...current,
         telegramMessageId: receiptMessageId,
         updatedAt: Date.now(),
-      });
+      };
+      this.host.store.saveQueuedTurnInput(updated);
+      this.host.updateStatus();
+      return updated;
     }
     this.host.updateStatus();
+    return {
+      queueId,
+      scopeId: event.scopeId,
+      chatId: event.chatId,
+      threadId: binding.threadId,
+      input,
+      sourceSummary,
+      telegramMessageId: receiptMessageId,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   listQueuedTurnInputs(scopeId: string): QueuedTurnInputRecord[] {
@@ -118,7 +134,7 @@ export class TurnQueueCoordinator {
       await this.host.messages.sendMessage(event.scopeId, t(locale, 'usage_queue'));
       return;
     }
-    const count = this.cancelQueuedTurnInputs(event.scopeId, action);
+    const count = await this.cancelQueuedTurnInputs(event.scopeId, action);
     await this.host.syncGuidedPlanQueueDepth(event.scopeId);
     await this.host.messages.sendMessage(
       event.scopeId,
@@ -131,7 +147,7 @@ export class TurnQueueCoordinator {
     action: 'next' | 'clear',
     locale: AppLocale,
   ): Promise<void> {
-    const count = this.cancelQueuedTurnInputs(event.scopeId, action);
+    const count = await this.cancelQueuedTurnInputs(event.scopeId, action);
     await this.host.syncGuidedPlanQueueDepth(event.scopeId);
     await this.showQueuePanel(event.scopeId, event.messageId, locale);
     await this.host.answerCallback(
@@ -167,6 +183,7 @@ export class TurnQueueCoordinator {
 
   private async startQueuedTurn(record: QueuedTurnInputRecord): Promise<boolean> {
     const locale = this.host.localeForChat(record.scopeId);
+    await this.host.dismissQueuedGuidancePrompt(record.queueId);
     this.host.store.updateQueuedTurnInputStatus(record.queueId, 'processing');
     await this.host.syncGuidedPlanQueueDepth(record.scopeId);
     try {
@@ -201,10 +218,11 @@ export class TurnQueueCoordinator {
     }
   }
 
-  private cancelQueuedTurnInputs(scopeId: string, mode: 'next' | 'clear'): number {
+  private async cancelQueuedTurnInputs(scopeId: string, mode: 'next' | 'clear'): Promise<number> {
     const queued = this.listQueuedTurnInputs(scopeId);
     const targets = mode === 'next' ? queued.slice(0, 1) : queued;
     for (const record of targets) {
+      await this.host.dismissQueuedGuidancePrompt(record.queueId);
       this.host.store.updateQueuedTurnInputStatus(record.queueId, 'cancelled');
     }
     return targets.length;

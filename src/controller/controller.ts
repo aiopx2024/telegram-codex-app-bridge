@@ -81,6 +81,7 @@ export class BridgeController {
     const composition = this.composition;
     await composition.turnLifecycle.abandonAllTurns();
     composition.threadPanels.clearDrafts();
+    composition.turnGuidance.stop();
     this.bot.stop();
     composition.approvalsAndInputs.stop();
     await this.app.stop();

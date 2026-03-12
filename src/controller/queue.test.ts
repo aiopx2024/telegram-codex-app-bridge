@@ -7,7 +7,7 @@ import test from 'node:test';
 import type { AppConfig } from '../config.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
-import type { TelegramTextEvent } from '../telegram/gateway.js';
+import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
 import type { TelegramInboundAttachment } from '../telegram/media.js';
 import { createBridgeComposition } from './composition.js';
 
@@ -31,6 +31,7 @@ function withComposition(run: (
   );
   return Promise.resolve(run(composition, store, bot, app, tempDir)).finally(async () => {
     await composition.turnLifecycle.abandonAllTurns();
+    composition.turnGuidance.stop();
     store.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -69,6 +70,8 @@ function makeBot() {
     messageEdits: [] as Array<{ chatId: string; messageId: number; text: string; keyboard: unknown }>,
     htmlMessages: [] as Array<{ chatId: string; text: string; keyboard: unknown }>,
     htmlEdits: [] as Array<{ chatId: string; messageId: number; text: string; keyboard: unknown }>,
+    deletedMessages: [] as Array<{ chatId: string; messageId: number }>,
+    clearedButtons: [] as Array<{ chatId: string; messageId: number }>,
     typings: [] as Array<{ chatId: string; topicId: number | null | undefined }>,
     downloads: [] as Array<{ remotePath: string; localPath: string }>,
     async answerCallback(_id: string, text: string) {
@@ -90,8 +93,12 @@ function makeBot() {
     async editHtmlMessage(chatId: string, messageId: number, text: string, keyboard?: unknown) {
       this.htmlEdits.push({ chatId, messageId, text, keyboard: keyboard ?? null });
     },
-    async clearMessageInlineKeyboard() {},
-    async deleteMessage() {},
+    async clearMessageInlineKeyboard(chatId: string, messageId: number) {
+      this.clearedButtons.push({ chatId, messageId });
+    },
+    async deleteMessage(chatId: string, messageId: number) {
+      this.deletedMessages.push({ chatId, messageId });
+    },
     async sendTypingInThread(chatId: string, topicId?: number | null) {
       this.typings.push({ chatId, topicId });
     },
@@ -116,6 +123,7 @@ function makeBot() {
 function makeApp() {
   return {
     startTurnCalls: [] as any[],
+    steerTurnCalls: [] as any[],
     isConnected() {
       return true;
     },
@@ -125,6 +133,10 @@ function makeApp() {
     async startTurn(options: any) {
       this.startTurnCalls.push(options);
       return { id: `turn-${this.startTurnCalls.length}`, status: 'running' };
+    },
+    async steerTurn(options: any) {
+      this.steerTurnCalls.push(options);
+      return { turnId: options.turnId };
     },
   };
 }
@@ -141,6 +153,19 @@ function makeTextEvent(text: string, attachments: TelegramInboundAttachment[] = 
     attachments,
     entities: [],
     replyToBot: false,
+    languageCode: 'en',
+  };
+}
+
+function makeCallbackEvent(data: string, messageId: number): TelegramCallbackEvent {
+  return {
+    chatId: 'chat-1',
+    topicId: null,
+    scopeId: 'chat-1',
+    userId: 'user-1',
+    data,
+    callbackQueryId: 'cb-1',
+    messageId,
     languageCode: 'en',
   };
 }
@@ -191,7 +216,7 @@ async function seedActiveTurn(composition: ReturnType<typeof createBridgeComposi
   );
 }
 
-test('running messages are queued instead of rejected', async () => {
+test('running messages are queued and offered a steer choice', async () => {
   await withComposition(async (composition, store, bot, _app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     await seedActiveTurn(composition, store, tempDir);
@@ -201,7 +226,47 @@ test('running messages are queued instead of rejected', async () => {
     const queued = store.peekQueuedTurnInput('chat-1');
     assert.equal(queued?.status, 'queued');
     assert.equal(queued?.sourceSummary, 'Follow up while busy');
-    assert.match(bot.messages.at(-1)?.text ?? '', /Queued\./);
+    assert.match(bot.messageEdits.at(-1)?.text ?? '', /Insert it into the current reply instead\?/);
+  });
+});
+
+test('guidance callback removes the queued item and steers the active turn', async () => {
+  await withComposition(async (composition, store, bot, app, tempDir) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+    await seedActiveTurn(composition, store, tempDir);
+
+    await composition.telegramRouter.handleText(makeTextEvent('Tighten the scope'));
+
+    const queued = store.peekQueuedTurnInput('chat-1');
+    assert.ok(queued?.queueId);
+    assert.ok(queued?.telegramMessageId);
+
+    await composition.telegramRouter.handleCallback(
+      makeCallbackEvent(`guidance:${queued!.queueId}:steer`, queued!.telegramMessageId!),
+    );
+
+    assert.equal(store.countQueuedTurnInputs('chat-1'), 0);
+    assert.equal(app.steerTurnCalls.length, 1);
+    assert.equal(app.steerTurnCalls[0]?.threadId, 'thread-1');
+    assert.equal(app.steerTurnCalls[0]?.turnId, 'turn-1');
+    assert.equal(app.steerTurnCalls[0]?.input?.[0]?.text, 'Tighten the scope');
+    assert.equal(bot.deletedMessages.at(-1)?.messageId, queued?.telegramMessageId);
+    assert.match(bot.answers.at(-1) ?? '', /Inserted into the current reply/);
+  });
+});
+
+test('/guide inserts guidance into the active turn without queuing', async () => {
+  await withComposition(async (composition, store, bot, app, tempDir) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+    await seedActiveTurn(composition, store, tempDir);
+
+    await composition.telegramRouter.handleCommand(makeTextEvent('/guide Use the existing API'), 'en', 'guide', ['Use', 'the', 'existing', 'API']);
+
+    assert.equal(store.countQueuedTurnInputs('chat-1'), 0);
+    assert.equal(app.steerTurnCalls.length, 1);
+    assert.equal(app.steerTurnCalls[0]?.turnId, 'turn-1');
+    assert.equal(app.steerTurnCalls[0]?.input?.[0]?.text, 'Use the existing API');
+    assert.match(bot.messages.at(-1)?.text ?? '', /Inserted your guidance into the current reply/);
   });
 });
 

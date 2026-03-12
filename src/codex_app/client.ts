@@ -82,6 +82,12 @@ interface StartTurnOptions {
   developerInstructions: string | null;
 }
 
+interface SteerTurnOptions {
+  threadId: string;
+  turnId: string;
+  input: TurnInput[];
+}
+
 export const PLAN_MODE_DEVELOPER_INSTRUCTIONS = [
   'When you need user input in plan mode, ask one concrete decision at a time.',
   'Prefer requestUserInput questions with 2-3 mutually exclusive options.',
@@ -234,6 +240,14 @@ export class CodexAppClient extends EventEmitter {
         : null,
     });
     return (result as any).turn;
+  }
+
+  async steerTurn(options: SteerTurnOptions): Promise<{ turnId: string }> {
+    return this.request('turn/steer', {
+      threadId: options.threadId,
+      input: options.input,
+      expectedTurnId: options.turnId,
+    }) as Promise<{ turnId: string }>;
   }
 
   async listModels(): Promise<ModelInfo[]> {

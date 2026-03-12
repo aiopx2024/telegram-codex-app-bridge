@@ -17,6 +17,7 @@ import { TelegramMessageService } from './telegram_message_service.js';
 import { ThreadPanelCoordinator } from './thread_panel.js';
 import { ThreadSessionService } from './thread_session.js';
 import { TurnExecutionCoordinator } from './turn_execution.js';
+import { TurnGuidanceCoordinator } from './turn_guidance.js';
 import { TurnLifecycleCoordinator } from './turn_lifecycle.js';
 import { TurnQueueCoordinator } from './turn_queue.js';
 import { TurnRenderingCoordinator } from './turn_rendering.js';
@@ -40,6 +41,7 @@ export interface BridgeComposition {
   settings: SettingsCoordinator;
   statusCommand: StatusCommandCoordinator;
   turnExecution: TurnExecutionCoordinator;
+  turnGuidance: TurnGuidanceCoordinator;
   turnQueue: TurnQueueCoordinator;
   telegramRouter: TelegramIngressRouter;
   codexRouter: CodexIngressRouter;
@@ -129,6 +131,7 @@ export function createBridgeComposition(
     turnRendering: TurnRenderingCoordinator;
     settings: SettingsCoordinator;
     turnExecution: TurnExecutionCoordinator;
+    turnGuidance: TurnGuidanceCoordinator;
     guidedPlans: GuidedPlanCoordinator;
     turnQueue: TurnQueueCoordinator;
   };
@@ -244,6 +247,20 @@ export function createBridgeComposition(
     onStatusChanged: updateStatus,
   });
 
+  refs.turnGuidance = new TurnGuidanceCoordinator({
+    logger,
+    store,
+    turns: activeTurns,
+    app,
+    messages,
+    localeForChat: (scopeId) => localeForChat(scopeId),
+    answerCallback: (callbackQueryId, text) => bot.answerCallback(callbackQueryId, text),
+    syncGuidedPlanQueueDepth,
+    updateStatus,
+    buildTurnInput: (binding, event, locale) => sessions.buildTurnInput(binding, event, locale),
+    resolveActiveTurnBinding: (scopeId, active) => sessions.resolveActiveTurnBinding(scopeId, active),
+  });
+
   refs.guidedPlans = new GuidedPlanCoordinator({
     store,
     logger,
@@ -289,10 +306,11 @@ export function createBridgeComposition(
     syncGuidedPlanQueueDepth,
     buildTurnInput: (binding, event, locale) => sessions.buildTurnInput(binding, event, locale),
     ensureThreadReady: (scopeId, binding) => sessions.ensureThreadReady(scopeId, binding),
-      launchTurn: (scopeId, chatId, chatType, topicId, binding, input, options) =>
+    launchTurn: (scopeId, chatId, chatType, topicId, binding, input, options) =>
       refs.turnExecution.startIncomingTurn(scopeId, chatId, chatType, topicId, binding, input, options),
-      answerCallback: (callbackQueryId, text) => bot.answerCallback(callbackQueryId, text),
-    });
+    answerCallback: (callbackQueryId, text) => bot.answerCallback(callbackQueryId, text),
+    dismissQueuedGuidancePrompt: (queueId) => refs.turnGuidance.dismissQueuedGuidancePrompt(queueId),
+  });
 
   const statusCommand = new StatusCommandCoordinator({
     store,
@@ -318,6 +336,7 @@ export function createBridgeComposition(
     threadPanels,
     queue: refs.turnQueue,
     turnExecution: refs.turnExecution,
+    turnGuidance: refs.turnGuidance,
     settings: refs.settings,
     sessions,
     statusCommand,
@@ -360,6 +379,7 @@ export function createBridgeComposition(
     settings: refs.settings,
     statusCommand,
     turnExecution: refs.turnExecution,
+    turnGuidance: refs.turnGuidance,
     turnQueue: refs.turnQueue,
     telegramRouter,
     codexRouter,

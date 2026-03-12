@@ -122,6 +122,30 @@ test('startThread forwards service tier and maps it back from the session respon
   assert.equal(session.serviceTier, 'flex');
 });
 
+test('steerTurn sends turn/steer with the expected active turn id', async () => {
+  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
+  let capturedMethod = '';
+  let capturedParams: any = null;
+  (client as any).request = async (method: string, params: any) => {
+    capturedMethod = method;
+    capturedParams = params;
+    return { turnId: 'turn-1' };
+  };
+
+  await client.steerTurn({
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    input: [{ type: 'text', text: 'Narrow the change', text_elements: [] }],
+  });
+
+  assert.equal(capturedMethod, 'turn/steer');
+  assert.deepEqual(capturedParams, {
+    threadId: 'thread-1',
+    input: [{ type: 'text', text: 'Narrow the change', text_elements: [] }],
+    expectedTurnId: 'turn-1',
+  });
+});
+
 test('renameThread calls thread/name/set with threadId and name', async () => {
   const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
   let capturedMethod = '';
