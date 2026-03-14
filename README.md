@@ -16,6 +16,7 @@ Use a Telegram bot to control a local Codex host through `codex app-server`.
 - Plan streaming with a single live plan card, version tracking, and restart-safe recovery prompts
 - Inline approval cards with summary, risk level, and detail/back views for command and file-change approvals
 - Interactive `request_user_input` flow with button-first choices, recommended-first options, review/back/cancel controls, and optional custom answers
+- Attachment batches that stage photos and files first, merge Telegram albums into one saved batch, and let the next plain-text message consume them
 - FIFO follow-up queue with `/queue`, automatic resume, and startup recovery for interrupted queued items
 - SQLite persistence for bindings, offsets, approvals, and audit logs
 - Stable segmented live rendering across private chat and topic/group modes
@@ -118,6 +119,8 @@ Practical guidance:
 
 - Prefer private chat if you want the simplest and most stable live experience.
 - Prefer one bot per topic if you keep multiple bots in the same group.
+- Plain text starts or continues a Codex turn immediately.
+- Photos and files are saved first. The bridge replies with paths and file metadata, then uses them when you send your next plain-text message or tap `Analyze now`.
 - Group/topic mode is a compatibility path, not the richest renderer.
 
 ## Configuration Model

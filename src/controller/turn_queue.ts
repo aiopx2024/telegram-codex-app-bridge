@@ -46,25 +46,47 @@ export class TurnQueueCoordinator {
     locale: AppLocale,
   ): Promise<QueuedTurnInputRecord> {
     const input = await this.host.buildTurnInput(binding, event, locale);
+    const sourceSummary = summarizeTelegramInput(event.text, event.attachments) || t(locale, 'queue_item_summary_fallback');
+    return this.enqueuePreparedTurnInput(
+      {
+        scopeId: event.scopeId,
+        chatId: event.chatId,
+        threadId: binding.threadId,
+        input,
+        sourceSummary,
+      },
+      locale,
+    );
+  }
+
+  async enqueuePreparedTurnInput(
+    params: {
+      scopeId: string;
+      chatId: string;
+      threadId: string;
+      input: TurnInput[];
+      sourceSummary: string;
+    },
+    locale: AppLocale,
+  ): Promise<QueuedTurnInputRecord> {
     const queueId = crypto.randomBytes(8).toString('hex');
     const now = Date.now();
-    const sourceSummary = summarizeTelegramInput(event.text, event.attachments) || t(locale, 'queue_item_summary_fallback');
     this.host.store.saveQueuedTurnInput({
       queueId,
-      scopeId: event.scopeId,
-      chatId: event.chatId,
-      threadId: binding.threadId,
-      input,
-      sourceSummary,
+      scopeId: params.scopeId,
+      chatId: params.chatId,
+      threadId: params.threadId,
+      input: params.input,
+      sourceSummary: params.sourceSummary,
       telegramMessageId: null,
       status: 'queued',
       createdAt: now,
       updatedAt: now,
     });
-    const queueDepth = this.host.store.countQueuedTurnInputs(event.scopeId);
-    await this.host.syncGuidedPlanQueueDepth(event.scopeId, queueDepth);
+    const queueDepth = this.host.store.countQueuedTurnInputs(params.scopeId);
+    await this.host.syncGuidedPlanQueueDepth(params.scopeId, queueDepth);
     const receiptMessageId = await this.host.messages.sendMessage(
-      event.scopeId,
+      params.scopeId,
       renderQueuedTurnReceiptMessage(locale, queueDepth - 1),
     );
     const current = this.host.store.getQueuedTurnInput(queueId);
@@ -81,11 +103,11 @@ export class TurnQueueCoordinator {
     this.host.updateStatus();
     return {
       queueId,
-      scopeId: event.scopeId,
-      chatId: event.chatId,
-      threadId: binding.threadId,
-      input,
-      sourceSummary,
+      scopeId: params.scopeId,
+      chatId: params.chatId,
+      threadId: params.threadId,
+      input: params.input,
+      sourceSummary: params.sourceSummary,
       telegramMessageId: receiptMessageId,
       status: 'queued',
       createdAt: now,

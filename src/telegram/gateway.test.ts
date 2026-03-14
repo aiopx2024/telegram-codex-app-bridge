@@ -27,6 +27,7 @@ test('TelegramGateway emits media messages with caption and attachments', async 
     update_id: 1,
     message: {
       message_id: 10,
+      media_group_id: 'group-1',
       chat: { id: 99, type: 'private' },
       from: { id: 42, language_code: 'zh-CN' },
       caption: '看看这张图',
@@ -40,6 +41,7 @@ test('TelegramGateway emits media messages with caption and attachments', async 
   assert.equal(events.length, 1);
   assert.equal(events[0]?.text, '看看这张图');
   assert.equal(events[0]?.attachments.length, 1);
+  assert.equal(events[0]?.mediaGroupId, 'group-1');
   assert.equal(events[0]?.scopeId, '99::root');
   assert.equal(events[0]?.topicId, null);
   assert.equal(events[0]?.replyToBot, false);
@@ -84,6 +86,7 @@ test('TelegramGateway emits document-only messages with empty text', async () =>
 
   assert.equal(events.length, 1);
   assert.equal(events[0]?.text, '');
+  assert.equal(events[0]?.mediaGroupId, null);
   assert.equal(events[0]?.attachments.length, 1);
   assert.equal(events[0]?.attachments[0]?.kind, 'document');
   assert.equal(events[0]?.attachments[0]?.fileName, 'report.pdf');
@@ -117,6 +120,7 @@ test('TelegramGateway emits topic messages for the configured group chat', async
 
   assert.equal(events.length, 1);
   assert.equal(events[0]?.scopeId, '-100123::8');
+  assert.equal(events[0]?.mediaGroupId, null);
   assert.equal(events[0]?.chatType, 'supergroup');
   assert.equal(events[0]?.topicId, 8);
   assert.equal(events[0]?.replyToBot, true);

@@ -26,6 +26,7 @@ interface TelegramMessage {
   message_id: number;
   chat: TelegramChat;
   message_thread_id?: number;
+  media_group_id?: string;
   is_topic_message?: boolean;
   from?: TelegramUser;
   text?: string;
@@ -73,6 +74,7 @@ interface TelegramCallbackButton {
 export interface TelegramTextEvent {
   chatId: string;
   topicId: number | null;
+  mediaGroupId: string | null;
   scopeId: string;
   chatType: string;
   userId: string;
@@ -319,6 +321,7 @@ export class TelegramGateway extends EventEmitter {
       const attachments = extractAttachments(update.message);
       const text = update.message.text ?? update.message.caption ?? '';
       const topicId = update.message.message_thread_id ?? null;
+      const mediaGroupId = update.message.media_group_id ?? null;
       const scopeId = createTelegramScopeId(String(update.message.chat.id), topicId);
       const entities = update.message.text ? (update.message.entities ?? []) : (update.message.caption_entities ?? []);
       const replyToBot = this.botUserId !== null && update.message.reply_to_message?.from?.id === this.botUserId;
@@ -326,6 +329,7 @@ export class TelegramGateway extends EventEmitter {
         this.emit('text', {
           chatId: String(update.message.chat.id),
           topicId,
+          mediaGroupId,
           scopeId,
           chatType: update.message.chat.type,
           userId: String(update.message.from.id),

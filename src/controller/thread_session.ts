@@ -136,9 +136,24 @@ export class ThreadSessionService {
       }];
     }
 
+    const stagedAttachments = await this.stageInboundAttachments(binding, event.attachments, locale);
+    return this.buildTurnInputFromStagedAttachments(event.text, stagedAttachments);
+  }
+
+  async stageInboundAttachments(
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+    attachments: readonly TelegramInboundAttachment[],
+    locale: AppLocale,
+  ): Promise<StagedTelegramAttachment[]> {
     const cwd = binding.cwd ?? this.host.config.defaultCwd;
-    const stagedAttachments = await this.stageAttachments(cwd, binding.threadId, event.attachments, locale);
-    const prompt = buildAttachmentPrompt(event.text, stagedAttachments);
+    return this.stageAttachments(cwd, binding.threadId, attachments, locale);
+  }
+
+  buildTurnInputFromStagedAttachments(
+    text: string,
+    stagedAttachments: readonly StagedTelegramAttachment[],
+  ): TurnInput[] {
+    const prompt = buildAttachmentPrompt(text, stagedAttachments);
     const input: TurnInput[] = [{
       type: 'text',
       text: prompt,

@@ -140,6 +140,7 @@ function makeText(text: string): TelegramTextEvent {
   return {
     chatId: 'chat-1',
     topicId: null,
+    mediaGroupId: null,
     scopeId: 'chat-1',
     chatType: 'private',
     userId: 'user-1',

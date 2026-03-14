@@ -145,6 +145,7 @@ function makeTextEvent(text: string, attachments: TelegramInboundAttachment[] = 
   return {
     chatId: 'chat-1',
     topicId: null,
+    mediaGroupId: null,
     scopeId: 'chat-1',
     chatType: 'private',
     userId: 'user-1',
@@ -270,12 +271,15 @@ test('/guide inserts guidance into the active turn without queuing', async () =>
   });
 });
 
-test('queued attachment messages are normalized before they are persisted', async () => {
+test('staged attachment batches are normalized before the follow-up message is queued', async () => {
   await withComposition(async (composition, store, bot, _app, tempDir) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
     await seedActiveTurn(composition, store, tempDir);
 
     await composition.telegramRouter.handleText(makeTextEvent('Review this image', [makePhotoAttachment()]));
+    assert.equal(store.countQueuedTurnInputs('chat-1'), 0);
+
+    await composition.telegramRouter.handleText(makeTextEvent('Focus on the error banner'));
 
     const queued = store.peekQueuedTurnInput('chat-1');
     assert.ok(queued);
@@ -285,6 +289,7 @@ test('queued attachment messages are normalized before they are persisted', asyn
     assert.equal(bot.downloads.length, 1);
     assert.ok(fs.existsSync(String(input[1]?.path)));
     assert.match(String(input[0]?.text ?? ''), /\.telegram-inbox/);
+    assert.match(String(input[0]?.text ?? ''), /Current request:/);
   });
 });
 

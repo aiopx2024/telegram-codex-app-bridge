@@ -6,6 +6,7 @@ import type { AppConfig } from '../config.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AppLocale, ThreadBinding } from '../types.js';
 import type { TurnRegistry } from './bridge_runtime.js';
+import type { AttachmentBatchCoordinator } from './attachment_batch.js';
 import type { ApprovalInputCoordinator, ApprovalAction } from './approval_input.js';
 import type { GuidedPlanCoordinator, PlanRecoveryAction, PlanSessionAction } from './guided_plan.js';
 import type { ThreadPanelCoordinator } from './thread_panel.js';
@@ -13,6 +14,7 @@ import type { TurnQueueCoordinator } from './turn_queue.js';
 import type { TurnExecutionCoordinator } from './turn_execution.js';
 import type { TurnGuidanceCoordinator } from './turn_guidance.js';
 import type { SettingsCoordinator } from './settings.js';
+import type { ServiceControlCoordinator } from './service_control.js';
 import type { ThreadSessionService } from './thread_session.js';
 import type { StatusCommandCoordinator } from './status_command.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
@@ -23,6 +25,7 @@ interface TelegramIngressHost {
   config: AppConfig;
   store: BridgeStore;
   turns: TurnRegistry;
+  attachmentBatches: AttachmentBatchCoordinator;
   approvalsAndInputs: ApprovalInputCoordinator;
   guidedPlans: GuidedPlanCoordinator;
   threadPanels: ThreadPanelCoordinator;
@@ -30,6 +33,7 @@ interface TelegramIngressHost {
   turnExecution: TurnExecutionCoordinator;
   turnGuidance: TurnGuidanceCoordinator;
   settings: SettingsCoordinator;
+  serviceControl: ServiceControlCoordinator;
   sessions: ThreadSessionService;
   statusCommand: StatusCommandCoordinator;
   messages: TelegramMessageService;
@@ -62,6 +66,8 @@ export class TelegramIngressRouter {
       fast: (event, locale, args) => this.host.settings.handleFastCommand(event, locale, args),
       mode: (event, locale, args) => this.host.settings.handleModeCommand(event, locale, args),
       settings: (event, locale) => this.host.settings.showSettingsHomePanel(event.scopeId, undefined, locale),
+      reconnect: (event, locale) => this.host.serviceControl.reconnect(event.scopeId, locale),
+      restart: (event, locale) => this.host.serviceControl.restart(event.scopeId, locale),
       queue: (event, locale, args) => this.host.queue.handleQueueCommand(event, locale, args),
       guide: (event, locale, args) => this.host.turnGuidance.handleGuideCommand(event, locale, args),
       permissions: (event, locale) => this.host.settings.showAccessSettingsPanel(event.scopeId, undefined, locale),
@@ -148,6 +154,15 @@ export class TelegramIngressRouter {
         handle: (event, match, locale) => this.host.queue.handleQueueCallback(event, match[1]! as 'next' | 'clear', locale),
       },
       {
+        pattern: /^attach:([a-f0-9]+):(next|analyze|clear)$/,
+        handle: (event, match, locale) => this.host.attachmentBatches.handleAttachmentBatchCallback(
+          event,
+          match[1]!,
+          match[2]! as 'next' | 'analyze' | 'clear',
+          locale,
+        ).then(() => undefined),
+      },
+      {
         pattern: /^input:([a-f0-9]+):(other|back|cancel|submit|edit:\d+|option:\d+)$/,
         handle: (event, match, locale) => this.host.approvalsAndInputs.handlePendingUserInputCallback(event, match[1]!, match[2]!, locale).then(() => undefined),
       },
@@ -195,6 +210,15 @@ export class TelegramIngressRouter {
     if (await this.host.threadPanels.handleThreadRenameText(scopeId, decision.text, locale)) {
       return;
     }
+    if (event.attachments.length > 0) {
+      const existingBinding = this.host.store.getBinding(scopeId);
+      const binding = existingBinding
+        ? await this.host.sessions.ensureThreadReady(scopeId, existingBinding)
+        : await this.host.sessions.createBinding(scopeId, null);
+      await this.host.messages.sendTyping(scopeId);
+      await this.host.attachmentBatches.handleInboundAttachmentMessage(event, binding, decision.text, locale);
+      return;
+    }
     const awaitingPlanConfirmation = this.host.guidedPlans.getAwaitingPlanConfirmationSession(scopeId);
     if (awaitingPlanConfirmation) {
       await this.host.messages.sendMessage(scopeId, t(locale, 'plan_confirmation_pending'));
@@ -204,6 +228,9 @@ export class TelegramIngressRouter {
       .find((session) => session.state === 'recovery_required') ?? null;
     if (recoveryRequiredSession) {
       await this.host.messages.sendMessage(scopeId, t(locale, 'plan_recovery_pending'));
+      return;
+    }
+    if (await this.host.attachmentBatches.handleTextWithPendingBatch({ ...event, text: decision.text }, decision.text, locale)) {
       return;
     }
     const activeTurn = this.host.turns.findByScope(scopeId);
@@ -272,6 +299,8 @@ export class TelegramIngressRouter {
       '/fast [off|flex]',
       '/mode',
       '/settings',
+      '/reconnect',
+      '/restart',
       '/queue',
       '/guide <text>',
       '/permissions',

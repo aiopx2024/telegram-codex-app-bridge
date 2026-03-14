@@ -1,6 +1,7 @@
 import type { PendingApprovalRecord, PlanSnapshotStep } from '../types.js';
 import type { TelegramRenderRoute } from '../telegram/rendering.js';
 import type { TurnOutputKind } from './activity.js';
+import type { TurnCompletionState } from './turn_completion.js';
 
 export interface RenderedTelegramMessage {
   messageId: number;
@@ -50,6 +51,9 @@ export interface ActiveTurn {
   draftText: string | null;
   buffer: string;
   finalText: string | null;
+  completionState: TurnCompletionState;
+  completionStatusText: string | null;
+  completionErrorText: string | null;
   interruptRequested: boolean;
   statusMessageText: string | null;
   statusNeedsRebase: boolean;
