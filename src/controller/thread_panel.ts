@@ -9,7 +9,7 @@ import type {
   CachedThread,
   ThreadBinding,
 } from '../types.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
 import { classifyAgentOutput } from './activity.js';
 import {
@@ -37,7 +37,7 @@ interface ThreadPanelHost {
   };
   store: BridgeStore;
   logger: Logger;
-  app: Pick<CodexAppClient, 'listThreads' | 'readThread' | 'readThreadWithTurns' | 'renameThread'>;
+  app: Pick<EngineProvider, 'listThreads' | 'readThread' | 'readThreadWithTurns' | 'renameThread'>;
   bindCachedThread: (scopeId: string, threadId: string) => Promise<ThreadBinding>;
   tryRevealThread: (scopeId: string, threadId: string, source: 'open') => Promise<string | null>;
   sendMessage: (scopeId: string, text: string, inlineKeyboard?: InlineKeyboard) => Promise<number>;

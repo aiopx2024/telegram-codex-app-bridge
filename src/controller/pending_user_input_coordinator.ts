@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import type {
   AppLocale,
   PendingUserInputQuestion,
@@ -23,7 +23,7 @@ import {
 interface PendingUserInputHost {
   store: BridgeStore;
   logger: Logger;
-  app: Pick<CodexAppClient, 'respond' | 'respondError'>;
+  app: Pick<EngineProvider, 'respond' | 'respondError'>;
   resolveChatByThread: (threadId: string) => string | null;
   localeForChat: (scopeId: string) => AppLocale;
   shouldAllowInteractiveUserInput: (scopeId: string) => boolean;

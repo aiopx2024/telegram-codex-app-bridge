@@ -1,4 +1,4 @@
-import type { CodexAppClient } from '../codex_app/client.js';
+import { resolveEngineCapabilities, type EngineProvider } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
@@ -6,7 +6,8 @@ import type { AccountRateLimitSnapshot, AppLocale } from '../types.js';
 import {
   formatAccessPresetLabel,
   formatApprovalPolicyLabel,
-  formatCollaborationModeLabel,
+  formatBridgeEngineLabel,
+  formatEngineModeLabel,
   formatSandboxModeLabel,
   formatServiceTierLabel,
 } from './presentation.js';
@@ -15,7 +16,7 @@ import type { TelegramMessageService } from './telegram_message_service.js';
 interface StatusCommandHost {
   store: BridgeStore;
   logger: Logger;
-  app: CodexAppClient;
+  app: EngineProvider;
   messages: TelegramMessageService;
   activeTurnCount: () => number;
   localeForChat: (scopeId: string) => AppLocale;
@@ -23,6 +24,8 @@ interface StatusCommandHost {
   lastError: () => string | null;
   updateStatus: () => void;
   config: {
+    bridgeEngine: 'codex' | 'gemini';
+    bridgeInstanceId: string | null;
     codexAppSyncOnOpen: boolean;
     codexAppSyncOnTurnComplete: boolean;
   };
@@ -31,61 +34,87 @@ interface StatusCommandHost {
 export class StatusCommandCoordinator {
   constructor(private readonly host: StatusCommandHost) {}
 
+  private get capabilities() {
+    return resolveEngineCapabilities(this.host.app.capabilities);
+  }
+
   async showStatus(scopeId: string, locale = this.host.localeForChat(scopeId)): Promise<void> {
     const binding = this.host.store.getBinding(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     const access = this.host.resolveEffectiveAccess(scopeId);
     const rateLimits = await this.readStatusRateLimits();
+    const capabilities = this.capabilities;
     this.host.updateStatus();
     const lines = [
+      t(locale, 'status_engine', { value: formatBridgeEngineLabel(locale, this.host.config.bridgeEngine) }),
+      t(locale, 'status_instance', { value: this.host.config.bridgeInstanceId ?? t(locale, 'none') }),
       t(locale, 'status_connected', { value: t(locale, this.host.app.isConnected() ? 'yes' : 'no') }),
       t(locale, 'status_last_error', { value: this.host.lastError() ?? t(locale, 'none') }),
       t(locale, 'status_user_agent', { value: this.host.app.getUserAgent() ?? t(locale, 'unknown') }),
       t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
       t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
-      t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
-      t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
-      t(locale, 'status_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
-      ...formatRateLimitStatusLines(locale, rateLimits),
-      t(locale, 'status_confirm_plan_before_execute', {
-        value: t(locale, (settings?.confirmPlanBeforeExecute ?? true) ? 'yes' : 'no'),
-      }),
+      capabilities.reasoningEffort
+        ? t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') })
+        : null,
+      capabilities.serviceTier
+        ? t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) })
+        : null,
+      (this.host.config.bridgeEngine === 'gemini' || capabilities.guidedPlan !== 'none')
+        ? t(locale, 'status_mode', { value: formatEngineModeLabel(locale, this.host.config.bridgeEngine, settings) })
+        : null,
+      ...(capabilities.rateLimits ? formatRateLimitStatusLines(locale, rateLimits) : []),
+      capabilities.guidedPlan !== 'none'
+        ? t(locale, 'status_confirm_plan_before_execute', {
+            value: t(locale, (settings?.confirmPlanBeforeExecute ?? true) ? 'yes' : 'no'),
+          })
+        : null,
       t(locale, 'status_auto_queue_messages', {
         value: t(locale, (settings?.autoQueueMessages ?? true) ? 'yes' : 'no'),
       }),
-      t(locale, 'status_persist_plan_history', {
-        value: t(locale, (settings?.persistPlanHistory ?? true) ? 'yes' : 'no'),
-      }),
-      t(locale, 'status_access_preset', { value: formatAccessPresetLabel(locale, access.preset as any) }),
-      t(locale, 'status_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy as any) }),
-      t(locale, 'status_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode as any) }),
-      t(locale, 'status_sync_on_open', { value: t(locale, this.host.config.codexAppSyncOnOpen ? 'yes' : 'no') }),
-      t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.host.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
+      capabilities.guidedPlan !== 'none'
+        ? t(locale, 'status_persist_plan_history', {
+            value: t(locale, (settings?.persistPlanHistory ?? true) ? 'yes' : 'no'),
+          })
+        : null,
+      capabilities.approvals !== 'none'
+        ? t(locale, 'status_access_preset', { value: formatAccessPresetLabel(locale, access.preset as any) })
+        : null,
+      capabilities.approvals !== 'none'
+        ? t(locale, 'status_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy as any) })
+        : null,
+      capabilities.approvals !== 'none'
+        ? t(locale, 'status_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode as any) })
+        : null,
+      this.host.config.bridgeEngine === 'codex'
+        ? t(locale, 'status_sync_on_open', { value: t(locale, this.host.config.codexAppSyncOnOpen ? 'yes' : 'no') })
+        : null,
+      this.host.config.bridgeEngine === 'codex'
+        ? t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.host.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') })
+        : null,
       t(locale, 'status_pending_approvals', { value: this.host.store.countPendingApprovals() }),
       t(locale, 'status_pending_user_inputs', { value: this.host.store.countPendingUserInputs() }),
       t(locale, 'status_pending_attachment_batches', { value: this.host.store.countPendingAttachmentBatches(scopeId) }),
       t(locale, 'status_queue_depth', { value: this.host.store.countQueuedTurnInputs(scopeId) }),
       t(locale, 'status_active_turns', { value: this.host.activeTurnCount() }),
-    ];
+    ].filter((line): line is string => Boolean(line));
     await this.host.messages.sendMessage(scopeId, lines.join('\n'));
   }
 
   private async readStatusRateLimits(): Promise<AccountRateLimitSnapshot | null> {
-    const app = this.host.app as {
-      getAccountRateLimits?: () => AccountRateLimitSnapshot | null;
-      readAccountRateLimits?: () => Promise<AccountRateLimitSnapshot | null>;
-    };
-    if (!this.host.app.isConnected()) {
-      return typeof app.getAccountRateLimits === 'function' ? app.getAccountRateLimits() : null;
+    if (!this.capabilities.rateLimits) {
+      return null;
     }
-    if (typeof app.readAccountRateLimits !== 'function') {
-      return typeof app.getAccountRateLimits === 'function' ? app.getAccountRateLimits() : null;
+    if (!this.host.app.isConnected()) {
+      return typeof this.host.app.getAccountRateLimits === 'function' ? this.host.app.getAccountRateLimits() : null;
+    }
+    if (typeof this.host.app.readAccountRateLimits !== 'function') {
+      return typeof this.host.app.getAccountRateLimits === 'function' ? this.host.app.getAccountRateLimits() : null;
     }
     try {
-      return await app.readAccountRateLimits();
+      return await this.host.app.readAccountRateLimits();
     } catch (error) {
       this.host.logger.warn('codex.account_rate_limits_status_failed', { error: String(error) });
-      return typeof app.getAccountRateLimits === 'function' ? app.getAccountRateLimits() : null;
+      return typeof this.host.app.getAccountRateLimits === 'function' ? this.host.app.getAccountRateLimits() : null;
     }
   }
 }
@@ -119,23 +148,23 @@ export function formatRateLimitStatusLines(locale: AppLocale, snapshot: AccountR
 
 function formatRateLimitWindowLabel(locale: AppLocale, windowDurationMins: number | null): string {
   if (windowDurationMins === 300) {
-    return locale === 'zh' ? '5小时' : '5h';
+    return locale === 'zh' ? '5小时' : locale === 'fr' ? '5 h' : '5h';
   }
   if (windowDurationMins === 10080) {
-    return locale === 'zh' ? '本周' : 'weekly';
+    return locale === 'zh' ? '本周' : locale === 'fr' ? 'hebdomadaire' : 'weekly';
   }
   if (windowDurationMins === null || !Number.isFinite(windowDurationMins) || windowDurationMins <= 0) {
     return t(locale, 'unknown');
   }
   if (windowDurationMins % 1440 === 0) {
     const days = Math.floor(windowDurationMins / 1440);
-    return locale === 'zh' ? `${days}天` : `${days}d`;
+    return locale === 'zh' ? `${days}天` : locale === 'fr' ? `${days} j` : `${days}d`;
   }
   if (windowDurationMins % 60 === 0) {
     const hours = Math.floor(windowDurationMins / 60);
-    return locale === 'zh' ? `${hours}小时` : `${hours}h`;
+    return locale === 'zh' ? `${hours}小时` : locale === 'fr' ? `${hours} h` : `${hours}h`;
   }
-  return locale === 'zh' ? `${windowDurationMins}分钟` : `${windowDurationMins}m`;
+  return locale === 'zh' ? `${windowDurationMins}分钟` : locale === 'fr' ? `${windowDurationMins} min` : `${windowDurationMins}m`;
 }
 
 function formatRateLimitResetAt(locale: AppLocale, resetsAt: number | null): string {

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig } from '../config.js';
-import type { TurnInput, CodexAppClient } from '../codex_app/client.js';
+import { resolveEngineCapabilities, type EngineProvider, type TurnInput } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
@@ -17,6 +17,7 @@ import type { TelegramGateway, TelegramTextEvent } from '../telegram/gateway.js'
 import type {
   AppLocale,
   CollaborationModeValue,
+  GeminiApprovalModeValue,
   ReasoningEffortValue,
   SandboxModeValue,
   ServiceTierValue,
@@ -35,10 +36,7 @@ interface ThreadSessionHost {
   config: AppConfig;
   store: BridgeStore;
   logger: Logger;
-  app: Pick<
-    CodexAppClient,
-    'listModels' | 'startThread' | 'startTurn' | 'resumeThread' | 'readThread' | 'revealThread'
-  >;
+  app: Pick<EngineProvider, 'capabilities' | 'listModels' | 'startThread' | 'startTurn' | 'resumeThread' | 'readThread' | 'revealThread'>;
   bot: Pick<TelegramGateway, 'getFile' | 'downloadResolvedFile'>;
   attachedThreads: ThreadAttachmentRegistry;
   localeForChat: (scopeId: string, languageCode?: string | null) => AppLocale;
@@ -50,10 +48,15 @@ interface StartTurnOptions {
   developerInstructions?: string | null;
   accessOverride?: { approvalPolicy: string; sandboxMode: SandboxModeValue };
   collaborationModeOverride?: CollaborationModeValue | null;
+  geminiApprovalModeOverride?: GeminiApprovalModeValue | null;
 }
 
 export class ThreadSessionService {
   constructor(private readonly host: ThreadSessionHost) {}
+
+  private get capabilities() {
+    return resolveEngineCapabilities(this.host.app.capabilities);
+  }
 
   async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
     const cwd = requestedCwd || this.host.config.defaultCwd;
@@ -64,7 +67,7 @@ export class ThreadSessionService {
       approvalPolicy: access.approvalPolicy,
       sandboxMode: access.sandboxMode,
       model: settings?.model ?? null,
-      serviceTier: settings?.serviceTier ?? null,
+      serviceTier: this.capabilities.serviceTier ? (settings?.serviceTier ?? null) : null,
     });
     return this.storeThreadSession(scopeId, session, 'seed');
   }
@@ -90,6 +93,7 @@ export class ThreadSessionService {
         serviceTier: turnConfig.serviceTier,
         effort: turnConfig.effort,
         collaborationMode: turnConfig.collaborationMode,
+        geminiApprovalMode: turnConfig.geminiApprovalMode,
         developerInstructions: options.developerInstructions ?? null,
       });
       return { threadId: binding.threadId, turnId: turn.id };
@@ -117,6 +121,7 @@ export class ThreadSessionService {
         serviceTier: nextTurnConfig.serviceTier,
         effort: nextTurnConfig.effort,
         collaborationMode: nextTurnConfig.collaborationMode,
+        geminiApprovalMode: nextTurnConfig.geminiApprovalMode,
         developerInstructions: options.developerInstructions ?? null,
       });
       return { threadId: replacement.threadId, turnId: turn.id };
@@ -314,23 +319,33 @@ export class ThreadSessionService {
     scopeId: string,
     settings = this.host.store.getChatSettings(scopeId),
     collaborationModeOverride?: CollaborationModeValue | null,
+    geminiApprovalModeOverride?: GeminiApprovalModeValue | null,
   ): Promise<{
     model: string | null;
     serviceTier: ServiceTierValue | null;
     effort: ReasoningEffortValue | null;
     collaborationMode: CollaborationModeValue | null;
+    geminiApprovalMode: GeminiApprovalModeValue | null;
   }> {
     let model = settings?.model ?? null;
-    const serviceTier = settings?.serviceTier ?? null;
-    const effort = settings?.reasoningEffort ?? null;
-    const collaborationMode = collaborationModeOverride === undefined
+    const capabilities = this.capabilities;
+    const serviceTier = capabilities.serviceTier ? (settings?.serviceTier ?? null) : null;
+    const effort = capabilities.reasoningEffort ? (settings?.reasoningEffort ?? null) : null;
+    const collaborationMode = capabilities.guidedPlan === 'none'
+      ? null
+      : collaborationModeOverride === undefined
       ? settings?.collaborationMode ?? null
       : collaborationModeOverride;
+    const geminiApprovalMode = this.host.config.bridgeEngine !== 'gemini'
+      ? null
+      : geminiApprovalModeOverride === undefined
+        ? settings?.geminiApprovalMode ?? null
+        : geminiApprovalModeOverride;
     if (collaborationMode === 'plan' && !model) {
       const models = await this.host.app.listModels();
       model = resolveCurrentModel(models, null)?.model ?? null;
     }
-    return { model, serviceTier, effort, collaborationMode };
+    return { model, serviceTier, effort, collaborationMode, geminiApprovalMode };
   }
 
   private async stageAttachments(

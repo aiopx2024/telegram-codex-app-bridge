@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import type { AppConfig } from '../config.js';
+import type { EngineCapabilities } from '../engine/types.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
 import type { TelegramTextEvent } from '../telegram/gateway.js';
@@ -13,16 +14,19 @@ function withComposition(run: (
   composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
-) => Promise<void>): Promise<void> {
+) => Promise<void>, options: {
+  config?: Partial<AppConfig>;
+  app?: ReturnType<typeof makeApp>;
+} = {}): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-status-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const composition = createBridgeComposition(
-    makeConfig(tempDir),
+    makeConfig(tempDir, options.config),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
-    makeApp() as any,
+    (options.app ?? makeApp()) as any,
   );
   return Promise.resolve(run(composition, store, bot)).finally(() => {
     store.close();
@@ -30,13 +34,22 @@ function withComposition(run: (
   });
 }
 
-function makeConfig(tempDir: string): AppConfig {
+function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppConfig {
   return {
+    envFile: path.join(tempDir, '.env'),
+    bridgeEngine: 'codex',
+    bridgeInstanceId: null,
+    bridgeHome: tempDir,
     tgBotToken: 'token',
     tgAllowedUserId: 'user-1',
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
+    geminiCliBin: 'gemini',
+    geminiDefaultModel: 'gemini-3-pro-preview',
+    geminiModelAllowlist: ['gemini-3-pro-preview'],
+    geminiIncludeDirectories: [],
+    geminiHeadlessTimeoutMs: 300_000,
     codexAppAutolaunch: false,
     codexAppLaunchCmd: '',
     codexAppSyncOnOpen: false,
@@ -52,6 +65,7 @@ function makeConfig(tempDir: string): AppConfig {
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
     lockPath: path.join(tempDir, 'bridge.lock'),
+    ...overrides,
   };
 }
 
@@ -76,8 +90,12 @@ function makeBot() {
   };
 }
 
-function makeApp() {
+function makeApp(options: {
+  capabilities?: Partial<EngineCapabilities> | null;
+  readAccountRateLimits?: (() => Promise<any>) | null;
+} = {}) {
   return {
+    capabilities: options.capabilities ?? null,
     isConnected() {
       return true;
     },
@@ -85,14 +103,17 @@ function makeApp() {
       return 'test-agent';
     },
     async readAccountRateLimits() {
-      return {
-        limitId: 'codex',
-        limitName: null,
-        primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1773082597 },
-        secondary: { usedPercent: 81, windowDurationMins: 10080, resetsAt: 1773531564 },
-        credits: { hasCredits: false, unlimited: false, balance: '0' },
-        planType: 'plus',
-      };
+      if (!options.readAccountRateLimits) {
+        return {
+          limitId: 'codex',
+          limitName: null,
+          primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1773082597 },
+          secondary: { usedPercent: 81, windowDurationMins: 10080, resetsAt: 1773531564 },
+          credits: { hasCredits: false, unlimited: false, balance: '0' },
+          planType: 'plus',
+        };
+      }
+      return options.readAccountRateLimits();
     },
     getAccountRateLimits() {
       return null;
@@ -144,5 +165,44 @@ test('/status shows 5-hour and weekly rate limit usage', async () => {
     assert.match(text, /5小时额度：已用 37%/);
     assert.match(text, /本周额度：已用 81%/);
     assert.match(text, /待处理附件批次：1/);
+  });
+});
+
+test('/status hides Codex-only sections for Gemini instances', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gemini-2.5-pro', 'medium', 'zh');
+    store.setChatGeminiApprovalMode('chat-1', 'yolo');
+
+    await composition.telegramRouter.handleCommand(makeTextEvent('/status'), 'zh', 'status', []);
+
+    const text = bot.messages[0]?.text ?? '';
+    assert.match(text, /引擎：Gemini CLI/);
+    assert.match(text, /实例：glinux144-gemini/);
+    assert.match(text, /已配置模型：gemini-2.5-pro/);
+    assert.match(text, /模式：YOLO/);
+    assert.doesNotMatch(text, /5小时额度：/);
+    assert.doesNotMatch(text, /本周额度：/);
+    assert.doesNotMatch(text, /已配置推理强度：/);
+    assert.doesNotMatch(text, /已配置服务档位：/);
+    assert.doesNotMatch(text, /审批策略：/);
+    assert.doesNotMatch(text, /沙箱模式：/);
+  }, {
+    config: {
+      bridgeEngine: 'gemini',
+      bridgeInstanceId: 'glinux144-gemini',
+    },
+    app: makeApp({
+      capabilities: {
+        threads: false,
+        reveal: false,
+        guidedPlan: 'none',
+        approvals: 'none',
+        steerActiveTurn: false,
+        rateLimits: false,
+        reasoningEffort: false,
+        serviceTier: false,
+        reconnect: false,
+      },
+    }),
   });
 });

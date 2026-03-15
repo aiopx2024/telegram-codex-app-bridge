@@ -3,7 +3,7 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
 import type { AppLocale, QueuedTurnInputRecord, ThreadBinding } from '../types.js';
-import type { CodexAppClient, TurnInput } from '../codex_app/client.js';
+import { resolveEngineCapabilities, type EngineProvider, type TurnInput } from '../engine/types.js';
 import type { TurnRegistry } from './bridge_runtime.js';
 import type { ActiveTurn } from './turn_state.js';
 import type { InlineKeyboard, TelegramMessageService } from './telegram_message_service.js';
@@ -24,7 +24,7 @@ interface TurnGuidanceHost {
   logger: Logger;
   store: BridgeStore;
   turns: TurnRegistry;
-  app: Pick<CodexAppClient, 'steerTurn'>;
+  app: Pick<EngineProvider, 'capabilities' | 'steerTurn'>;
   messages: Pick<TelegramMessageService, 'sendMessage' | 'editMessage' | 'deleteMessage' | 'clearMessageButtons'>;
   localeForChat: (scopeId: string) => AppLocale;
   answerCallback: (callbackQueryId: string, text: string) => Promise<void>;
@@ -44,6 +44,10 @@ export class TurnGuidanceCoordinator {
 
   constructor(private readonly host: TurnGuidanceHost) {}
 
+  private get capabilities() {
+    return resolveEngineCapabilities(this.host.app.capabilities);
+  }
+
   stop(): void {
     for (const prompt of this.prompts.values()) {
       if (prompt.timer) {
@@ -58,6 +62,9 @@ export class TurnGuidanceCoordinator {
     expectedTurnId: string,
     locale: AppLocale,
   ): Promise<void> {
+    if (!this.capabilities.steerActiveTurn) {
+      return;
+    }
     if (this.getSteerBlockMessageKey(record.scopeId)) {
       return;
     }
@@ -114,6 +121,10 @@ export class TurnGuidanceCoordinator {
     action: 'steer' | 'keep',
     locale: AppLocale,
   ): Promise<void> {
+    if (!this.capabilities.steerActiveTurn) {
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'guidance_not_supported'));
+      return;
+    }
     const record = this.host.store.getQueuedTurnInput(queueId);
     const prompt = this.prompts.get(queueId);
     if (!record || record.status !== 'queued' || !prompt || prompt.messageId !== event.messageId) {
@@ -176,6 +187,10 @@ export class TurnGuidanceCoordinator {
   }
 
   async handleGuideCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.capabilities.steerActiveTurn) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'guidance_not_supported'));
+      return;
+    }
     const text = args.join(' ').trim();
     if (!text) {
       await this.host.messages.sendMessage(event.scopeId, t(locale, 'usage_guide'));

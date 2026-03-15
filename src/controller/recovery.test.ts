@@ -36,11 +36,20 @@ function withController(run: (
 
 function makeConfig(tempDir: string): AppConfig {
   return {
+    envFile: path.join(tempDir, '.env'),
+    bridgeEngine: 'codex',
+    bridgeInstanceId: null,
+    bridgeHome: tempDir,
     tgBotToken: 'token',
     tgAllowedUserId: 'user-1',
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
+    geminiCliBin: 'gemini',
+    geminiDefaultModel: 'gemini-3-pro-preview',
+    geminiModelAllowlist: ['gemini-3-pro-preview'],
+    geminiIncludeDirectories: [],
+    geminiHeadlessTimeoutMs: 300_000,
     codexAppAutolaunch: false,
     codexAppLaunchCmd: '',
     codexAppSyncOnOpen: false,

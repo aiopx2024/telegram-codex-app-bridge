@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import type { Logger } from '../logger.js';
 import { writeRuntimeStatus } from '../runtime.js';
 import type { BridgeStore } from '../store/database.js';
@@ -89,9 +89,9 @@ export class RuntimeStatusStore {
   private lastError: string | null = null;
 
   constructor(
-    private readonly config: Pick<AppConfig, 'statusPath'>,
+    private readonly config: Pick<AppConfig, 'statusPath' | 'bridgeEngine' | 'bridgeInstanceId'>,
     private readonly store: BridgeStore,
-    private readonly app: CodexAppClient,
+    private readonly app: EngineProvider,
     private readonly turns: TurnRegistry,
   ) {}
 
@@ -120,10 +120,12 @@ export class RuntimeStatusStore {
   }
 
   getRuntimeStatus(): RuntimeStatus {
-    const accountRateLimits = typeof (this.app as { getAccountRateLimits?: () => RuntimeStatus['accountRateLimits'] }).getAccountRateLimits === 'function'
+    const accountRateLimits = typeof this.app.getAccountRateLimits === 'function'
       ? this.app.getAccountRateLimits()
       : null;
     return {
+      engine: this.config.bridgeEngine,
+      instanceId: this.config.bridgeInstanceId,
       running: true,
       connected: this.app.isConnected(),
       userAgent: this.app.getUserAgent(),

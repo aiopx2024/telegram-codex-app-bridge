@@ -1,5 +1,5 @@
 import type { AppConfig } from '../config.js';
-import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest } from '../codex_app/client.js';
+import type { EngineProvider, EngineNotification, EngineServerRequest } from '../engine/types.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent, TelegramGateway, TelegramTextEvent } from '../telegram/gateway.js';
@@ -17,7 +17,7 @@ export class BridgeController {
     private readonly store: BridgeStore,
     private readonly logger: Logger,
     private readonly bot: TelegramGateway,
-    private readonly app: CodexAppClient,
+    private readonly app: EngineProvider,
   ) {
     this.composition = createBridgeComposition(config, this.store, this.logger, this.bot, this.app);
   }
@@ -35,12 +35,12 @@ export class BridgeController {
         void this.handleAsyncError('telegram.callback', error, event.scopeId);
       });
     });
-    this.app.on('notification', (msg: JsonRpcNotification) => {
+    this.app.on('notification', (msg: EngineNotification) => {
       void composition.codexRouter.handleNotification(msg).catch((error) => {
         void this.handleAsyncError('codex.notification', error);
       });
     });
-    this.app.on('serverRequest', (msg: JsonRpcServerRequest) => {
+    this.app.on('serverRequest', (msg: EngineServerRequest) => {
       void composition.codexRouter.handleServerRequest(msg).catch((error) => {
         void this.handleAsyncError('codex.server_request', error);
       });

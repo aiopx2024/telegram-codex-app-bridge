@@ -11,7 +11,7 @@ test('interrupt status wins over all other activity states', () => {
     reasoningActive: true,
     hasStreamingReply: true,
   });
-  assert.equal(text, 'Interrupt requested. Waiting for Codex to stop...');
+  assert.equal(text, 'Interrupt requested. Waiting for the current engine to stop...');
 });
 
 test('approval status is rendered separately from thinking', () => {

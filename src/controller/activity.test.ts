@@ -110,3 +110,22 @@ test('normalizes failed turn completion into semantic terminal states', () => {
     errorText: 'Insufficient quota for this account',
   });
 });
+
+test('normalizes gemini capacity exhaustion into a rate-limited terminal state', () => {
+  const event = normalizeTurnActivityEvent({
+    method: 'turn/completed',
+    params: {
+      turnId: 'turn-3',
+      status: 'error',
+      error: { message: 'No capacity available for model gemini-3.1-pro-preview on the server' },
+    },
+  });
+
+  assert.deepEqual(event, {
+    kind: 'turn_completed',
+    turnId: 'turn-3',
+    state: 'rate_limited',
+    statusText: 'error',
+    errorText: 'No capacity available for model gemini-3.1-pro-preview on the server',
+  });
+});

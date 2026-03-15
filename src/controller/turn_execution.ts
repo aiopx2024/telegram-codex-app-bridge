@@ -3,7 +3,7 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { AppLocale, PendingApprovalRecord, ThreadBinding } from '../types.js';
-import type { CodexAppClient, TurnInput } from '../codex_app/client.js';
+import type { EngineProvider, TurnInput } from '../engine/types.js';
 import type { TurnRegistry } from './bridge_runtime.js';
 import type { ActiveTurn } from './turn_state.js';
 import { PLAN_MODE_DRAFT_ONLY_DEVELOPER_INSTRUCTIONS, type GuidedPlanCoordinator } from './guided_plan.js';
@@ -17,7 +17,7 @@ import { formatUserError } from './utils.js';
 interface TurnExecutionHost {
   logger: Logger;
   store: BridgeStore;
-  app: Pick<CodexAppClient, 'interruptTurn' | 'respond'>;
+  app: Pick<EngineProvider, 'interruptTurn' | 'respond'>;
   turns: TurnRegistry;
   localeForChat: (scopeId: string) => AppLocale;
   shouldRequirePlanConfirmation: (scopeId: string) => boolean;

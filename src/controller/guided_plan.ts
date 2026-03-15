@@ -11,9 +11,9 @@ import {
   type ThreadBinding,
 } from '../types.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
+import type { TurnInput } from '../engine/types.js';
 import {
   PLAN_MODE_DEVELOPER_INSTRUCTIONS,
-  type TurnInput,
 } from '../codex_app/client.js';
 
 export type PlanSessionAction = 'confirm' | 'revise' | 'cancel';

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import type { AppLocale, PendingApprovalRecord } from '../types.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
 import {
@@ -18,7 +18,7 @@ import {
 interface ApprovalHost {
   store: BridgeStore;
   logger: Logger;
-  app: Pick<CodexAppClient, 'respond'>;
+  app: Pick<EngineProvider, 'respond'>;
   resolveChatByThread: (threadId: string) => string | null;
   localeForChat: (scopeId: string) => AppLocale;
   notePendingApprovalStatus: (threadId: string, kind: PendingApprovalRecord['kind']) => Promise<void>;

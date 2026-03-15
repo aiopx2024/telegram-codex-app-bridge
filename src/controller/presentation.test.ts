@@ -295,11 +295,40 @@ test('mode presentation renders and marks selected option', () => {
   };
 
   assert.equal(formatCollaborationModeLabel('en', 'plan'), 'Plan');
-  assert.match(formatModeSettingsMessage('en', 'chat-mode::root', settings), /Scope: chat-mode \/ root/);
-  assert.match(formatModeSettingsMessage('en', 'chat-mode::root', settings), /Current mode: <b>Plan<\/b>/);
-  assert.deepEqual(buildModeSettingsKeyboard('en', settings), [[
+  assert.match(formatModeSettingsMessage('en', 'codex', 'chat-mode::root', settings), /Scope: chat-mode \/ root/);
+  assert.match(formatModeSettingsMessage('en', 'codex', 'chat-mode::root', settings), /Current mode: <b>Plan<\/b>/);
+  assert.deepEqual(buildModeSettingsKeyboard('en', 'codex', settings), [[
     { text: 'Default', callback_data: 'settings:mode:default' },
     { text: '• Plan', callback_data: 'settings:mode:plan' },
+  ], [
+    { text: 'Settings', callback_data: 'settings:home' },
+  ]]);
+});
+
+test('gemini mode presentation renders four approval modes', () => {
+  const settings: ChatSessionSettings = {
+    chatId: 'chat-gemini-mode',
+    model: 'gemini-2.5-pro',
+    reasoningEffort: null,
+    serviceTier: null,
+    locale: 'en',
+    accessPreset: null,
+    collaborationMode: null,
+    geminiApprovalMode: 'yolo',
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: true,
+    persistPlanHistory: true,
+    updatedAt: Date.now(),
+  };
+
+  assert.match(formatModeSettingsMessage('en', 'gemini', 'chat-gemini-mode::root', settings), /Gemini supports default, auto_edit, yolo, and plan approval modes here/);
+  assert.match(formatModeSettingsMessage('en', 'gemini', 'chat-gemini-mode::root', settings), /Current mode: <b>YOLO<\/b>/);
+  assert.deepEqual(buildModeSettingsKeyboard('en', 'gemini', settings), [[
+    { text: 'Default', callback_data: 'settings:mode:default' },
+    { text: 'Auto edit', callback_data: 'settings:mode:auto_edit' },
+  ], [
+    { text: '• YOLO', callback_data: 'settings:mode:yolo' },
+    { text: 'Plan', callback_data: 'settings:mode:plan' },
   ], [
     { text: 'Settings', callback_data: 'settings:home' },
   ]]);
@@ -327,6 +356,8 @@ test('settings home presentation summarizes session state and exposes toggles', 
 
   const rendered = formatSettingsHomeMessage('en', {
     scopeId: 'chat-settings::root',
+    engine: 'codex',
+    instanceId: 'linux144-codex',
     threadId: 'thread-1',
     cwd: '/tmp/project',
     settings,
@@ -337,6 +368,8 @@ test('settings home presentation summarizes session state and exposes toggles', 
   const keyboard = buildSettingsHomeKeyboard('en', settings);
 
   assert.match(rendered, /<b>Settings<\/b>/);
+  assert.match(rendered, /Engine: Codex/);
+  assert.match(rendered, /Instance: linux144-codex/);
   assert.match(rendered, /Scope: chat-settings \/ root/);
   assert.match(rendered, /Thread: <b>thread-1<\/b>/);
   assert.match(rendered, /Queue depth: <b>2<\/b>/);

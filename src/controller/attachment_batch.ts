@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { TurnInput } from '../codex_app/client.js';
+import type { TurnInput } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';

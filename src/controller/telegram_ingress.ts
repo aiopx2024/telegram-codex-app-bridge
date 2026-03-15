@@ -1,8 +1,9 @@
 import { parseCommand } from './commands.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
-import { t } from '../i18n.js';
+import { getTelegramCommands, t } from '../i18n.js';
 import type { AppConfig } from '../config.js';
+import { resolveEngineCapabilities, type EngineCapabilities } from '../engine/types.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AppLocale, ThreadBinding } from '../types.js';
 import type { TurnRegistry } from './bridge_runtime.js';
@@ -37,6 +38,7 @@ interface TelegramIngressHost {
   sessions: ThreadSessionService;
   statusCommand: StatusCommandCoordinator;
   messages: TelegramMessageService;
+  providerCapabilities: EngineCapabilities;
   localeForChat: (scopeId: string, languageCode?: string | null) => AppLocale;
   botUsername: () => string | null;
   answerCallback: (callbackQueryId: string, text: string) => Promise<void>;
@@ -265,6 +267,10 @@ export class TelegramIngressRouter {
       await this.host.messages.sendMessage(event.scopeId, t(locale, 'unknown_command', { name }));
       return;
     }
+    if (!this.isCommandSupported(name)) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name }));
+      return;
+    }
     await handler(event, locale, args);
   }
 
@@ -287,28 +293,16 @@ export class TelegramIngressRouter {
   }
 
   private async showHelp(scopeId: string, locale: AppLocale): Promise<void> {
+    const commands = getTelegramCommands(locale, this.host.config.bridgeEngine)
+      .map((entry) => `/${entry.command}`);
+    const trailer = [
+      ...(this.host.config.bridgeEngine === 'codex' ? [t(locale, 'help_advanced_aliases')] : []),
+      t(locale, 'help_plain_text_hint'),
+    ];
     await this.host.messages.sendMessage(scopeId, [
       t(locale, 'help_commands_title'),
-      '/help',
-      '/status',
-      '/threads [query]',
-      '/open <n>',
-      '/new [cwd]',
-      '/models',
-      '/tier [auto|fast|flex]',
-      '/fast [off|flex]',
-      '/mode',
-      '/settings',
-      '/reconnect',
-      '/restart',
-      '/queue',
-      '/guide <text>',
-      '/permissions',
-      '/reveal',
-      '/where',
-      '/interrupt',
-      t(locale, 'help_advanced_aliases'),
-      t(locale, 'help_plain_text_hint'),
+      ...commands,
+      ...trailer,
     ].join('\n'));
   }
 
@@ -364,6 +358,10 @@ export class TelegramIngressRouter {
   }
 
   private async handleRevealCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    if (this.host.config.bridgeEngine !== 'codex') {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'reveal_not_supported'));
+      return;
+    }
     const binding = this.host.store.getBinding(scopeId);
     if (!binding) {
       await this.host.messages.sendMessage(scopeId, t(locale, 'no_thread_bound_reveal'));
@@ -376,5 +374,35 @@ export class TelegramIngressRouter {
       return;
     }
     await this.host.messages.sendMessage(scopeId, t(locale, 'opened_thread_in_codex', { threadId: readyBinding.threadId }));
+  }
+
+  private isCommandSupported(name: string): boolean {
+    const capabilities = resolveEngineCapabilities(this.host.providerCapabilities);
+    switch (name) {
+      case 'threads':
+      case 'open':
+        return capabilities.threads;
+      case 'guide':
+        return capabilities.steerActiveTurn;
+      case 'reveal':
+      case 'focus':
+        return capabilities.reveal;
+      case 'reconnect':
+        return capabilities.reconnect;
+      case 'mode':
+        return this.host.config.bridgeEngine === 'gemini' || capabilities.guidedPlan === 'full';
+      case 'plan':
+        return capabilities.guidedPlan === 'full';
+      case 'permissions':
+      case 'access':
+        return capabilities.approvals !== 'none';
+      case 'tier':
+      case 'fast':
+        return capabilities.serviceTier;
+      case 'effort':
+        return capabilities.reasoningEffort;
+      default:
+        return true;
+    }
   }
 }

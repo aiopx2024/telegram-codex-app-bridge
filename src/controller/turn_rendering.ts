@@ -442,18 +442,36 @@ function formatToolBatchHeading(locale: AppLocale, counts: ToolBatchCounts, inPr
   const hasCommand = counts.commands > 0;
   let verb: string;
   if (hasEdit && !hasBrowse && !hasCommand) {
-    verb = locale === 'zh' ? (inProgress ? '正在编辑' : '已编辑') : (inProgress ? 'Editing' : 'Edited');
+    verb = locale === 'zh'
+      ? (inProgress ? '正在编辑' : '已编辑')
+      : locale === 'fr'
+        ? (inProgress ? 'Modification en cours' : 'Modifie')
+        : (inProgress ? 'Editing' : 'Edited');
   } else if (hasBrowse && !hasEdit && !hasCommand) {
-    verb = locale === 'zh' ? (inProgress ? '正在浏览' : '已浏览') : (inProgress ? 'Browsing' : 'Browsed');
+    verb = locale === 'zh'
+      ? (inProgress ? '正在浏览' : '已浏览')
+      : locale === 'fr'
+        ? (inProgress ? 'Navigation en cours' : 'Consulte')
+        : (inProgress ? 'Browsing' : 'Browsed');
   } else if (hasCommand && !hasBrowse && !hasEdit) {
-    verb = locale === 'zh' ? (inProgress ? '正在运行' : '已运行') : (inProgress ? 'Running' : 'Ran');
+    verb = locale === 'zh'
+      ? (inProgress ? '正在运行' : '已运行')
+      : locale === 'fr'
+        ? (inProgress ? 'Execution en cours' : 'Execute')
+        : (inProgress ? 'Running' : 'Ran');
   } else {
-    verb = locale === 'zh' ? (inProgress ? '正在处理' : '已处理') : (inProgress ? 'Processing' : 'Processed');
+    verb = locale === 'zh'
+      ? (inProgress ? '正在处理' : '已处理')
+      : locale === 'fr'
+        ? (inProgress ? 'Traitement en cours' : 'Traite')
+        : (inProgress ? 'Processing' : 'Processed');
   }
   if (parts.length === 0) {
     return locale === 'zh'
       ? `${verb}操作...`
-      : `${verb} operations...`;
+      : locale === 'fr'
+        ? `${verb} des operations...`
+        : `${verb} operations...`;
   }
   return locale === 'zh'
     ? `${verb} ${parts.join('，')}`
@@ -463,16 +481,16 @@ function formatToolBatchHeading(locale: AppLocale, counts: ToolBatchCounts, inPr
 function formatToolBatchCountParts(locale: AppLocale, counts: ToolBatchCounts): string[] {
   const parts: string[] = [];
   if (counts.files > 0) {
-    parts.push(locale === 'zh' ? `${counts.files} 个文件` : pluralize(counts.files, 'file'));
+    parts.push(locale === 'zh' ? `${counts.files} 个文件` : locale === 'fr' ? pluralizeFr(counts.files, 'fichier') : pluralize(counts.files, 'file'));
   }
   if (counts.searches > 0) {
-    parts.push(locale === 'zh' ? `${counts.searches} 个搜索` : pluralize(counts.searches, 'search'));
+    parts.push(locale === 'zh' ? `${counts.searches} 个搜索` : locale === 'fr' ? pluralizeFr(counts.searches, 'recherche') : pluralize(counts.searches, 'search'));
   }
   if (counts.edits > 0) {
-    parts.push(locale === 'zh' ? `${counts.edits} 个编辑` : pluralize(counts.edits, 'edit'));
+    parts.push(locale === 'zh' ? `${counts.edits} 个编辑` : locale === 'fr' ? pluralizeFr(counts.edits, 'modification') : pluralize(counts.edits, 'edit'));
   }
   if (counts.commands > 0) {
-    parts.push(locale === 'zh' ? `${counts.commands} 个命令` : pluralize(counts.commands, 'command'));
+    parts.push(locale === 'zh' ? `${counts.commands} 个命令` : locale === 'fr' ? pluralizeFr(counts.commands, 'commande') : pluralize(counts.commands, 'command'));
   }
   return parts;
 }
@@ -486,6 +504,11 @@ function pluralize(count: number, noun: string): string {
     : noun === 'file'
       ? 'files'
       : `${noun}s`;
+  return `${count} ${plural}`;
+}
+
+function pluralizeFr(count: number, noun: string): string {
+  const plural = count === 1 ? noun : `${noun}s`;
   return `${count} ${plural}`;
 }
 

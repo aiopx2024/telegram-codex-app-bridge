@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import type { AppConfig } from '../config.js';
+import type { EngineCapabilities } from '../engine/types.js';
 import { Logger } from '../logger.js';
 import { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
@@ -14,16 +15,19 @@ function withComposition(run: (
   composition: ReturnType<typeof createBridgeComposition>,
   store: BridgeStore,
   bot: ReturnType<typeof makeBot>,
-) => Promise<void>): Promise<void> {
+) => Promise<void>, options: {
+  config?: Partial<AppConfig>;
+  app?: ReturnType<typeof makeApp>;
+} = {}): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-settings-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const bot = makeBot();
   const composition = createBridgeComposition(
-    makeConfig(tempDir),
+    makeConfig(tempDir, options.config),
     store,
     new Logger('error', path.join(tempDir, 'bridge.log')),
     bot as any,
-    makeApp() as any,
+    (options.app ?? makeApp()) as any,
   );
   return Promise.resolve(run(composition, store, bot)).finally(() => {
     store.close();
@@ -31,13 +35,22 @@ function withComposition(run: (
   });
 }
 
-function makeConfig(tempDir: string): AppConfig {
+function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppConfig {
   return {
+    envFile: path.join(tempDir, '.env'),
+    bridgeEngine: 'codex',
+    bridgeInstanceId: null,
+    bridgeHome: tempDir,
     tgBotToken: 'token',
     tgAllowedUserId: 'user-1',
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
+    geminiCliBin: 'gemini',
+    geminiDefaultModel: 'gemini-3-pro-preview',
+    geminiModelAllowlist: ['gemini-3-pro-preview'],
+    geminiIncludeDirectories: [],
+    geminiHeadlessTimeoutMs: 300_000,
     codexAppAutolaunch: false,
     codexAppLaunchCmd: '',
     codexAppSyncOnOpen: false,
@@ -53,6 +66,7 @@ function makeConfig(tempDir: string): AppConfig {
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
     lockPath: path.join(tempDir, 'bridge.lock'),
+    ...overrides,
   };
 }
 
@@ -83,7 +97,9 @@ function makeBot() {
   };
 }
 
-function makeApp() {
+function makeApp(options: {
+  capabilities?: Partial<EngineCapabilities> | null;
+} = {}) {
   const models: ModelInfo[] = [{
     id: 'model-gpt-5',
     model: 'gpt-5',
@@ -94,6 +110,7 @@ function makeApp() {
     defaultReasoningEffort: 'medium',
   }];
   return {
+    capabilities: options.capabilities ?? null,
     isConnected() {
       return true;
     },
@@ -216,5 +233,35 @@ test('service tier changes are blocked while a turn is active', async () => {
 
     assert.equal(store.getChatSettings('chat-1')?.serviceTier, null);
     assert.match(bot.messages.at(-1) ?? '', /Cannot change service tier while a turn is active/);
+  });
+});
+
+test('gemini /mode accepts yolo and persists it as the next approval mode', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gemini-2.5-pro', 'medium', 'en');
+
+    await composition.telegramRouter.handleCommand({ scopeId: 'chat-1' } as any, 'en', 'mode', ['yolo']);
+
+    assert.equal(store.getChatSettings('chat-1')?.geminiApprovalMode, 'yolo');
+    assert.match(bot.messages.at(-1) ?? '', /Mode: YOLO/);
+    assert.match(bot.messages.at(-1) ?? '', /Scope: chat-1 \/ root/);
+  }, {
+    config: {
+      bridgeEngine: 'gemini',
+      bridgeInstanceId: 'glinux144-gemini',
+    },
+    app: makeApp({
+      capabilities: {
+        threads: false,
+        reveal: false,
+        guidedPlan: 'none',
+        approvals: 'none',
+        steerActiveTurn: false,
+        rateLimits: false,
+        reasoningEffort: false,
+        serviceTier: false,
+        reconnect: false,
+      },
+    }),
   });
 });

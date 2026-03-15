@@ -1,4 +1,4 @@
-import type { JsonRpcNotification, JsonRpcServerRequest, CodexAppClient } from '../codex_app/client.js';
+import type { EngineNotification, EngineProvider, EngineServerRequest } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
@@ -15,7 +15,7 @@ import type { TurnRegistry, RuntimeStatusStore } from './bridge_runtime.js';
 interface CodexIngressHost {
   logger: Logger;
   store: BridgeStore;
-  app: CodexAppClient;
+  app: EngineProvider;
   turns: TurnRegistry;
   approvalsAndInputs: ApprovalInputCoordinator;
   guidedPlans: GuidedPlanCoordinator;
@@ -31,7 +31,7 @@ interface CodexIngressHost {
 export class CodexIngressRouter {
   constructor(private readonly host: CodexIngressHost) {}
 
-  async handleNotification(notification: JsonRpcNotification): Promise<void> {
+  async handleNotification(notification: EngineNotification): Promise<void> {
     const activity = normalizeTurnActivityEvent(notification);
     if (activity) {
       await this.host.turnExecution.handleTurnActivityEvent(activity);
@@ -96,7 +96,7 @@ export class CodexIngressRouter {
     }
   }
 
-  async handleServerRequest(request: JsonRpcServerRequest): Promise<void> {
+  async handleServerRequest(request: EngineServerRequest): Promise<void> {
     switch (request.method) {
       case 'item/commandExecution/requestApproval': {
         const params = request.params as any;

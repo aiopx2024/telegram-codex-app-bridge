@@ -1,4 +1,5 @@
 import path from 'node:path';
+import type { BridgeEngineValue } from '../config.js';
 import { t } from '../i18n.js';
 import { parseTelegramScopeId } from '../telegram/scope.js';
 import type {
@@ -8,6 +9,7 @@ import type {
   ApprovalPolicyValue,
   ChatSessionSettings,
   CollaborationModeValue,
+  GeminiApprovalModeValue,
   ModelInfo,
   ReasoningEffortValue,
   SandboxModeValue,
@@ -107,27 +109,38 @@ export function formatThreadHistoryPreviewMessage(
 
 export function formatWhereMessage(
   locale: AppLocale,
+  engine: BridgeEngineValue,
   thread: AppThread,
   settings: ChatSessionSettings | null,
   defaultCwd: string,
   access: ResolvedAccessMode,
+  options: {
+    showEffort?: boolean;
+    showServiceTier?: boolean;
+    showMode?: boolean;
+    showAccess?: boolean;
+  } = {},
 ): string {
+  const showEffort = options.showEffort ?? true;
+  const showServiceTier = options.showServiceTier ?? true;
+  const showMode = options.showMode ?? true;
+  const showAccess = options.showAccess ?? true;
   return [
     t(locale, 'where_thread', { value: thread.threadId }),
     t(locale, 'where_title', { value: thread.name || t(locale, 'untitled') }),
     t(locale, 'where_preview', { value: thread.preview || t(locale, 'empty') }),
     t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
-    t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
-    t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
-    t(locale, 'where_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
-    t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
-    t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
-    t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
+    showEffort ? t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }) : null,
+    showServiceTier ? t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }) : null,
+    showMode ? t(locale, 'where_mode', { value: formatEngineModeLabel(locale, engine, settings) }) : null,
+    showAccess ? t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }) : null,
+    showAccess ? t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }) : null,
+    showAccess ? t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }) : null,
     t(locale, 'where_provider', { value: thread.modelProvider ?? t(locale, 'unknown') }),
     t(locale, 'where_status', { value: formatStatus(locale, thread.status) }),
     t(locale, 'where_cwd', { value: thread.cwd ?? defaultCwd }),
     t(locale, 'where_updated', { value: formatIsoTime(locale, thread.updatedAt) }),
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 export function formatAccessSettingsMessage(locale: AppLocale, access: ResolvedAccessMode): string {
@@ -145,6 +158,8 @@ export function formatSettingsHomeMessage(
   locale: AppLocale,
   state: {
     scopeId: string;
+    engine: BridgeEngineValue;
+    instanceId: string | null;
     threadId: string | null;
     cwd: string | null;
     settings: ChatSessionSettings | null;
@@ -152,11 +167,25 @@ export function formatSettingsHomeMessage(
     queueDepth: number;
     activeTurnId: string | null;
   },
+  options: {
+    showEffort?: boolean;
+    showServiceTier?: boolean;
+    showMode?: boolean;
+    showAccess?: boolean;
+    showPlanControls?: boolean;
+  } = {},
 ): string {
+  const showEffort = options.showEffort ?? true;
+  const showServiceTier = options.showServiceTier ?? true;
+  const showMode = options.showMode ?? true;
+  const showAccess = options.showAccess ?? true;
+  const showPlanControls = options.showPlanControls ?? true;
   return [
     t(locale, 'settings_home_title'),
     t(locale, 'settings_home_hint'),
     '',
+    t(locale, 'status_engine', { value: escapeTelegramHtml(formatBridgeEngineLabel(locale, state.engine)) }),
+    t(locale, 'status_instance', { value: escapeTelegramHtml(state.instanceId ?? t(locale, 'none')) }),
     t(locale, 'line_scope', { value: escapeTelegramHtml(formatTelegramScopeLabel(locale, state.scopeId)) }),
     t(locale, 'settings_current_thread', { value: escapeTelegramHtml(state.threadId ?? t(locale, 'none')) }),
     t(locale, 'line_cwd', { value: escapeTelegramHtml(state.cwd ?? t(locale, 'no_cwd')) }),
@@ -164,40 +193,77 @@ export function formatSettingsHomeMessage(
     t(locale, 'settings_queue_depth', { value: state.queueDepth }),
     '',
     t(locale, 'status_configured_model', { value: escapeTelegramHtml(state.settings?.model ?? t(locale, 'server_default')) }),
-    t(locale, 'status_configured_effort', { value: escapeTelegramHtml(state.settings?.reasoningEffort ?? t(locale, 'server_default')) }),
-    t(locale, 'status_configured_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, state.settings?.serviceTier ?? null)) }),
-    t(locale, 'status_mode', { value: escapeTelegramHtml(formatCollaborationModeLabel(locale, state.settings?.collaborationMode ?? null)) }),
-    t(locale, 'status_access_preset', { value: escapeTelegramHtml(formatAccessPresetLabel(locale, state.access.preset)) }),
-    t(locale, 'settings_plan_gate', {
+    showEffort
+      ? t(locale, 'status_configured_effort', { value: escapeTelegramHtml(state.settings?.reasoningEffort ?? t(locale, 'server_default')) })
+      : null,
+    showServiceTier
+      ? t(locale, 'status_configured_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, state.settings?.serviceTier ?? null)) })
+      : null,
+    showMode
+      ? t(locale, 'status_mode', { value: escapeTelegramHtml(formatEngineModeLabel(locale, state.engine, state.settings)) })
+      : null,
+    showAccess
+      ? t(locale, 'status_access_preset', { value: escapeTelegramHtml(formatAccessPresetLabel(locale, state.access.preset)) })
+      : null,
+    showPlanControls ? t(locale, 'settings_plan_gate', {
       value: t(locale, (state.settings?.confirmPlanBeforeExecute ?? true) ? 'yes' : 'no'),
-    }),
+    }) : null,
     t(locale, 'settings_auto_queue', {
       value: t(locale, (state.settings?.autoQueueMessages ?? true) ? 'yes' : 'no'),
     }),
-    t(locale, 'settings_plan_history', {
+    showPlanControls ? t(locale, 'settings_plan_history', {
       value: t(locale, (state.settings?.persistPlanHistory ?? true) ? 'yes' : 'no'),
-    }),
+    }) : null,
   ].filter(Boolean).join('\n');
 }
 
 export function formatModeSettingsMessage(
   locale: AppLocale,
+  engine: BridgeEngineValue,
   scopeId: string,
   settings: ChatSessionSettings | null,
 ): string {
   return [
     t(locale, 'mode_title'),
-    t(locale, 'mode_tap_to_change'),
+    engine === 'gemini' ? t(locale, 'mode_tap_to_change_gemini') : t(locale, 'mode_tap_to_change_codex'),
     '',
     t(locale, 'line_scope', { value: escapeTelegramHtml(formatTelegramScopeLabel(locale, scopeId)) }),
-    t(locale, 'mode_current', { value: escapeTelegramHtml(formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null)) }),
+    t(locale, 'mode_current', { value: escapeTelegramHtml(formatEngineModeLabel(locale, engine, settings)) }),
   ].join('\n');
 }
 
 export function buildModeSettingsKeyboard(
   locale: AppLocale,
+  engine: BridgeEngineValue,
   settings: ChatSessionSettings | null,
 ): InlineButton[][] {
+  if (engine === 'gemini') {
+    const current = settings?.geminiApprovalMode ?? null;
+    return [[
+      {
+        text: `${current === null || current === 'default' ? '• ' : ''}${t(locale, 'mode_default')}`,
+        callback_data: 'settings:mode:default',
+      },
+      {
+        text: `${current === 'auto_edit' ? '• ' : ''}${t(locale, 'mode_auto_edit')}`,
+        callback_data: 'settings:mode:auto_edit',
+      },
+    ], [
+      {
+        text: `${current === 'yolo' ? '• ' : ''}${t(locale, 'mode_yolo')}`,
+        callback_data: 'settings:mode:yolo',
+      },
+      {
+        text: `${current === 'plan' ? '• ' : ''}${t(locale, 'mode_plan')}`,
+        callback_data: 'settings:mode:plan',
+      },
+    ], [
+      {
+        text: t(locale, 'button_settings_home'),
+        callback_data: 'settings:home',
+      },
+    ]];
+  }
   const current = settings?.collaborationMode ?? null;
   return [[
     {
@@ -242,7 +308,13 @@ export function formatModelSettingsMessage(
   locale: AppLocale,
   models: ModelInfo[],
   settings: ChatSessionSettings | null,
+  options: {
+    showEffort?: boolean;
+    showServiceTier?: boolean;
+  } = {},
 ): string {
+  const showEffort = options.showEffort ?? true;
+  const showServiceTier = options.showServiceTier ?? true;
   const selectedModel = resolveCurrentModel(models, settings?.model ?? null);
   const selectedModelLabel = settings?.model ?? t(locale, 'server_default');
   const selectedEffort = settings?.reasoningEffort ?? null;
@@ -258,12 +330,14 @@ export function formatModelSettingsMessage(
     t(locale, 'models_tap_to_change'),
     '',
     t(locale, 'models_model', { value: escapeTelegramHtml(selectedModelLabel) }),
-    t(locale, 'models_effort', { value: escapeTelegramHtml(selectedEffort ?? t(locale, 'server_default')) }),
-    t(locale, 'models_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, selectedServiceTier)) }),
+    showEffort ? t(locale, 'models_effort', { value: escapeTelegramHtml(selectedEffort ?? t(locale, 'server_default')) }) : null,
+    showServiceTier ? t(locale, 'models_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, selectedServiceTier)) }) : null,
     selectedModel ? t(locale, 'models_current_default_target', { value: escapeTelegramHtml(selectedModel.model) }) : null,
-    supportedEfforts.length > 0
+    showEffort && supportedEfforts.length > 0
       ? t(locale, 'models_supported_efforts', { value: escapeTelegramHtml(supportedEfforts.join(', ')) })
-      : t(locale, 'models_supported_efforts_unknown'),
+      : showEffort
+        ? t(locale, 'models_supported_efforts_unknown')
+        : null,
   ].filter(Boolean).join('\n');
 }
 
@@ -271,7 +345,13 @@ export function buildModelSettingsKeyboard(
   locale: AppLocale,
   models: ModelInfo[],
   settings: ChatSessionSettings | null,
+  options: {
+    showEffort?: boolean;
+    showServiceTier?: boolean;
+  } = {},
 ): InlineButton[][] {
+  const showEffort = options.showEffort ?? true;
+  const showServiceTier = options.showServiceTier ?? true;
   const currentModel = settings?.model ?? null;
   const effectiveModel = resolveCurrentModel(models, currentModel);
   const efforts = effectiveModel?.supportedReasoningEfforts.length
@@ -318,8 +398,8 @@ export function buildModelSettingsKeyboard(
 
   return [
     ...chunkButtons(modelButtons, 2),
-    ...chunkButtons(effortButtons, 3),
-    serviceTierButtons,
+    ...(showEffort ? chunkButtons(effortButtons, 3) : []),
+    ...(showServiceTier ? [serviceTierButtons] : []),
     [{
       text: t(locale, 'button_settings_home'),
       callback_data: 'settings:home',
@@ -330,28 +410,37 @@ export function buildModelSettingsKeyboard(
 export function buildSettingsHomeKeyboard(
   locale: AppLocale,
   settings: ChatSessionSettings | null,
+  options: {
+    showMode?: boolean;
+    showAccess?: boolean;
+    showPlanControls?: boolean;
+  } = {},
 ): InlineButton[][] {
+  const showMode = options.showMode ?? true;
+  const showAccess = options.showAccess ?? true;
+  const showPlanControls = options.showPlanControls ?? true;
   const planGateOn = settings?.confirmPlanBeforeExecute ?? true;
   const autoQueueOn = settings?.autoQueueMessages ?? true;
   const historyOn = settings?.persistPlanHistory ?? true;
+  const navButtons: InlineButton[] = [
+    { text: t(locale, 'button_models'), callback_data: 'nav:models' },
+    ...(showMode ? [{ text: t(locale, 'button_mode'), callback_data: 'nav:mode' }] : []),
+    ...(showAccess ? [{ text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }] : []),
+  ];
   return [
-    [
-      { text: t(locale, 'button_models'), callback_data: 'nav:models' },
-      { text: t(locale, 'button_mode'), callback_data: 'nav:mode' },
-      { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
-    ],
-    [{
+    navButtons,
+    ...(showPlanControls ? [[{
       text: t(locale, 'settings_toggle_plan_gate', { value: t(locale, planGateOn ? 'yes' : 'no') }),
       callback_data: `settings:plan-gate:${planGateOn ? 'off' : 'on'}`,
-    }],
+    }]] : []),
     [{
       text: t(locale, 'settings_toggle_auto_queue', { value: t(locale, autoQueueOn ? 'yes' : 'no') }),
       callback_data: `settings:queue:${autoQueueOn ? 'off' : 'on'}`,
     }],
-    [{
+    ...(showPlanControls ? [[{
       text: t(locale, 'settings_toggle_history', { value: t(locale, historyOn ? 'yes' : 'no') }),
       callback_data: `settings:history:${historyOn ? 'off' : 'on'}`,
-    }],
+    }]] : []),
   ];
 }
 
@@ -432,6 +521,27 @@ export function formatCollaborationModeLabel(locale: AppLocale, mode: Collaborat
   return t(locale, 'mode_default');
 }
 
+export function formatGeminiApprovalModeLabel(locale: AppLocale, mode: GeminiApprovalModeValue | null | undefined): string {
+  if (mode === 'auto_edit') return t(locale, 'mode_auto_edit');
+  if (mode === 'yolo') return t(locale, 'mode_yolo');
+  if (mode === 'plan') return t(locale, 'mode_plan');
+  return t(locale, 'mode_default');
+}
+
+export function formatEngineModeLabel(
+  locale: AppLocale,
+  engine: BridgeEngineValue,
+  settings: ChatSessionSettings | null,
+): string {
+  return engine === 'gemini'
+    ? formatGeminiApprovalModeLabel(locale, settings?.geminiApprovalMode ?? null)
+    : formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null);
+}
+
+export function formatBridgeEngineLabel(locale: AppLocale, engine: BridgeEngineValue): string {
+  return engine === 'gemini' ? t(locale, 'engine_gemini') : t(locale, 'engine_codex');
+}
+
 export function formatTelegramScopeLabel(locale: AppLocale, scopeId: string): string {
   try {
     const scope = parseTelegramScopeId(scopeId);
@@ -505,6 +615,12 @@ function formatRelativeTime(locale: AppLocale, unixSeconds: number): string {
     if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}分钟前`;
     if (deltaSeconds < 86_400) return `${Math.floor(deltaSeconds / 3600)}小时前`;
     return `${Math.floor(deltaSeconds / 86_400)}天前`;
+  }
+  if (locale === 'fr') {
+    if (deltaSeconds < 60) return `il y a ${deltaSeconds} s`;
+    if (deltaSeconds < 3600) return `il y a ${Math.floor(deltaSeconds / 60)} min`;
+    if (deltaSeconds < 86_400) return `il y a ${Math.floor(deltaSeconds / 3600)} h`;
+    return `il y a ${Math.floor(deltaSeconds / 86_400)} j`;
   }
   if (deltaSeconds < 60) return `${deltaSeconds}s ago`;
   if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;

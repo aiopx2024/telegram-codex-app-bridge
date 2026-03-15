@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { AccountRateLimitSnapshot, AppLocale } from '../types.js';
@@ -15,7 +15,7 @@ const RESTART_SCRIPT_PATH = path.resolve(CONTROLLER_DIR, '../../scripts/service/
 
 interface ServiceControlHost {
   logger: Logger;
-  app: Pick<CodexAppClient, 'isConnected' | 'getAccountRateLimits' | 'readAccountRateLimits' | 'start' | 'stop'>;
+  app: Pick<EngineProvider, 'isConnected' | 'start' | 'stop'> & Partial<Pick<EngineProvider, 'getAccountRateLimits' | 'readAccountRateLimits'>>;
   messages: TelegramMessageService;
   localeForChat: (scopeId: string) => AppLocale;
   activeTurnCount: () => number;
@@ -37,10 +37,12 @@ export class ServiceControlCoordinator {
       this.host.updateStatus();
       await this.host.app.start();
       let rateLimits: AccountRateLimitSnapshot | null = null;
-      try {
-        rateLimits = await this.host.app.readAccountRateLimits();
-      } catch (error) {
-        this.host.logger.warn('codex.reconnect_rate_limits_failed', { error: String(error) });
+      if (typeof this.host.app.readAccountRateLimits === 'function') {
+        try {
+          rateLimits = await this.host.app.readAccountRateLimits();
+        } catch (error) {
+          this.host.logger.warn('codex.reconnect_rate_limits_failed', { error: String(error) });
+        }
       }
       this.host.runtimeStatus.clearLastError();
       this.host.updateStatus();

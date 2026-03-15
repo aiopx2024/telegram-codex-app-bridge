@@ -1,9 +1,9 @@
 import type { AppConfig } from '../config.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import { resolveEngineCapabilities, type EngineProvider } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
-import type { AppLocale, ModelInfo, ServiceTierValue } from '../types.js';
+import type { AppLocale, GeminiApprovalModeValue, ModelInfo, ServiceTierValue } from '../types.js';
 import { normalizeAccessPreset, resolveAccessMode, type ResolvedAccessMode } from './access.js';
 import {
   buildAccessSettingsKeyboard,
@@ -15,6 +15,8 @@ import {
   formatAccessSettingsMessage,
   formatApprovalPolicyLabel,
   formatCollaborationModeLabel,
+  formatEngineModeLabel,
+  formatGeminiApprovalModeLabel,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
   formatServiceTierLabel,
@@ -31,12 +33,12 @@ import type { ThreadPanelCoordinator } from './thread_panel.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
 import type { ThreadSessionService } from './thread_session.js';
 import type { TurnRegistry } from './bridge_runtime.js';
-import { normalizeRequestedCollaborationMode } from './utils.js';
+import { normalizeRequestedCollaborationMode, normalizeRequestedGeminiApprovalMode } from './utils.js';
 
 interface SettingsHost {
   config: AppConfig;
   store: BridgeStore;
-  app: Pick<CodexAppClient, 'listModels' | 'readThread'>;
+  app: Pick<EngineProvider, 'capabilities' | 'listModels' | 'readThread'>;
   messages: TelegramMessageService;
   threadPanels: Pick<ThreadPanelCoordinator, 'showThreadsPanel'>;
   sessions: Pick<ThreadSessionService, 'ensureThreadReady' | 'tryRevealThread'>;
@@ -48,6 +50,34 @@ interface SettingsHost {
 
 export class SettingsCoordinator {
   constructor(private readonly host: SettingsHost) {}
+
+  private get capabilities() {
+    return resolveEngineCapabilities(this.host.app.capabilities);
+  }
+
+  private supportsGuidedPlan(): boolean {
+    return this.capabilities.guidedPlan === 'full';
+  }
+
+  private supportsModeSettings(): boolean {
+    return this.host.config.bridgeEngine === 'gemini' || this.supportsGuidedPlan();
+  }
+
+  private isGeminiEngine(): boolean {
+    return this.host.config.bridgeEngine === 'gemini';
+  }
+
+  private supportsAccessSettings(): boolean {
+    return this.capabilities.approvals !== 'none';
+  }
+
+  private supportsReasoningEffort(): boolean {
+    return this.capabilities.reasoningEffort;
+  }
+
+  private supportsServiceTier(): boolean {
+    return this.capabilities.serviceTier;
+  }
 
   resolveEffectiveAccess(scopeId: string, settings = this.host.store.getChatSettings(scopeId)): ResolvedAccessMode {
     return resolveAccessMode(this.host.config, settings);
@@ -63,12 +93,31 @@ export class SettingsCoordinator {
   }
 
   async handleModeCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.supportsModeSettings()) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'mode' }));
+      return;
+    }
     const scopeId = event.scopeId;
     if (args.length === 0) {
       await this.showModeSettingsPanel(scopeId, undefined, locale);
       return;
     }
     const normalized = args.join(' ').trim().toLowerCase();
+    if (this.isGeminiEngine()) {
+      const nextMode = normalizeRequestedGeminiApprovalMode(normalized);
+      if (!nextMode && normalized !== 'default') {
+        await this.showModeSettingsPanel(scopeId, undefined, locale);
+        return;
+      }
+      this.host.store.setChatGeminiApprovalMode(scopeId, nextMode);
+      await this.host.messages.sendMessage(scopeId, [
+        t(locale, 'callback_mode', {
+          value: formatGeminiApprovalModeLabel(locale, nextMode),
+        }),
+        t(locale, 'line_scope', { value: formatTelegramScopeLabel(locale, scopeId) }),
+      ].join('\n'));
+      return;
+    }
     const nextMode = normalizeRequestedCollaborationMode(normalized);
     if (!nextMode && normalized !== 'default' && normalized !== 'plan') {
       await this.showModeSettingsPanel(scopeId, undefined, locale);
@@ -88,6 +137,10 @@ export class SettingsCoordinator {
   }
 
   async handlePlanAliasCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.supportsGuidedPlan()) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'plan' }));
+      return;
+    }
     const normalized = args.join(' ').trim().toLowerCase();
     if (!normalized || normalized === 'on' || normalized === 'enable' || normalized === 'enabled') {
       await this.applyCollaborationMode(event.scopeId, 'plan', locale);
@@ -165,6 +218,10 @@ export class SettingsCoordinator {
   }
 
   async handleEffortCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.supportsReasoningEffort()) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'effort' }));
+      return;
+    }
     const scopeId = event.scopeId;
     if (args.length === 0) {
       await this.showModelSettingsPanel(scopeId, undefined, locale);
@@ -212,6 +269,10 @@ export class SettingsCoordinator {
   }
 
   async handleTierCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.supportsServiceTier()) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'tier' }));
+      return;
+    }
     const scopeId = event.scopeId;
     if (args.length === 0) {
       await this.showModelSettingsPanel(scopeId, undefined, locale);
@@ -230,6 +291,10 @@ export class SettingsCoordinator {
   }
 
   async handleFastCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.supportsServiceTier()) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'fast' }));
+      return;
+    }
     const scopeId = event.scopeId;
     if (this.host.turns.findByScope(scopeId)) {
       await this.host.messages.sendMessage(scopeId, t(locale, 'tier_change_blocked'));
@@ -256,11 +321,27 @@ export class SettingsCoordinator {
       return;
     }
     if (kind === 'access') {
+      if (!this.supportsAccessSettings()) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
       await this.handleAccessSettingsCallback(event, rawValue, locale);
       return;
     }
     if (kind === 'mode') {
+      if (!this.supportsModeSettings()) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
       await this.handleModeSettingsCallback(event, rawValue, locale);
+      return;
+    }
+    if (kind === 'effort' && !this.supportsReasoningEffort()) {
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    if (kind === 'tier' && !this.supportsServiceTier()) {
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
     const models = await this.host.app.listModels();
@@ -359,18 +440,34 @@ export class SettingsCoordinator {
       return;
     }
     if (target === 'mode') {
+      if (!this.supportsModeSettings()) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
       await this.showModeSettingsPanel(scopeId, event.messageId, locale);
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'opened_mode_settings'));
       return;
     }
     if (target === 'permissions') {
+      if (!this.supportsAccessSettings()) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
       await this.showAccessSettingsPanel(scopeId, event.messageId, locale);
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'opened_access_settings'));
       return;
     }
     if (target === 'threads') {
+      if (!this.capabilities.threads) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
       await this.host.threadPanels.showThreadsPanel(scopeId, event.messageId, undefined, locale);
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'opened_thread_list'));
+      return;
+    }
+    if (!this.capabilities.reveal) {
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
     const binding = this.host.store.getBinding(scopeId);
@@ -390,53 +487,89 @@ export class SettingsCoordinator {
     const binding = this.host.store.getBinding(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
+    const showEffort = this.supportsReasoningEffort();
+    const showServiceTier = this.supportsServiceTier();
+    const showMode = this.supportsModeSettings();
+    const showAccess = this.supportsAccessSettings();
     if (!binding) {
       const text = [
         t(locale, 'where_no_thread_bound'),
         t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
-        t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
-        t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
-        t(locale, 'where_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
-        t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
-        t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
-        t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
+        showEffort ? t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }) : null,
+        showServiceTier ? t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }) : null,
+        showMode ? t(locale, 'where_mode', { value: formatEngineModeLabel(locale, this.host.config.bridgeEngine, settings) }) : null,
+        showAccess ? t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }) : null,
+        showAccess ? t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }) : null,
+        showAccess ? t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }) : null,
         t(locale, 'where_send_message_or_new'),
-      ].join('\n');
+      ].filter(Boolean).join('\n');
+      const keyboard = whereKeyboard(locale, {
+        hasBinding: false,
+        showMode,
+        showAccess,
+        showThreads: this.capabilities.threads,
+        showReveal: false,
+      });
       if (messageId !== undefined) {
-        await this.host.messages.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
+        await this.host.messages.editMessage(scopeId, messageId, text, keyboard);
         return;
       }
-      await this.host.messages.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      await this.host.messages.sendMessage(scopeId, text, keyboard);
       return;
     }
     const readyBinding = await this.host.sessions.ensureThreadReady(scopeId, binding);
     const thread = await this.host.app.readThread(readyBinding.threadId, false);
     if (!thread) {
       const text = t(locale, 'where_thread_unavailable', { threadId: readyBinding.threadId });
+      const keyboard = whereKeyboard(locale, {
+        hasBinding: false,
+        showMode,
+        showAccess,
+        showThreads: this.capabilities.threads,
+        showReveal: false,
+      });
       if (messageId !== undefined) {
-        await this.host.messages.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
+        await this.host.messages.editMessage(scopeId, messageId, text, keyboard);
         return;
       }
-      await this.host.messages.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      await this.host.messages.sendMessage(scopeId, text, keyboard);
       return;
     }
     const threadWithDisplayName = {
       ...thread,
       name: this.host.store.getThreadNameOverride(scopeId, thread.threadId) ?? thread.name,
     };
-    const text = formatWhereMessage(locale, threadWithDisplayName, settings, this.host.config.defaultCwd, access);
+    const text = formatWhereMessage(locale, this.host.config.bridgeEngine, threadWithDisplayName, settings, this.host.config.defaultCwd, access, {
+      showEffort,
+      showServiceTier,
+      showMode,
+      showAccess,
+    });
+    const keyboard = whereKeyboard(locale, {
+      hasBinding: true,
+      showMode,
+      showAccess,
+      showThreads: this.capabilities.threads,
+      showReveal: this.capabilities.reveal,
+    });
     if (messageId !== undefined) {
-      await this.host.messages.editMessage(scopeId, messageId, text, whereKeyboard(locale, true));
+      await this.host.messages.editMessage(scopeId, messageId, text, keyboard);
       return;
     }
-    await this.host.messages.sendMessage(scopeId, text, whereKeyboard(locale, true));
+    await this.host.messages.sendMessage(scopeId, text, keyboard);
   }
 
   async showModelSettingsPanel(scopeId: string, messageId?: number, locale = this.host.localeForChat(scopeId)): Promise<void> {
     const models = await this.host.app.listModels();
     const settings = this.host.store.getChatSettings(scopeId);
-    const text = formatModelSettingsMessage(locale, models, settings);
-    const keyboard = buildModelSettingsKeyboard(locale, models, settings);
+    const text = formatModelSettingsMessage(locale, models, settings, {
+      showEffort: this.supportsReasoningEffort(),
+      showServiceTier: this.supportsServiceTier(),
+    });
+    const keyboard = buildModelSettingsKeyboard(locale, models, settings, {
+      showEffort: this.supportsReasoningEffort(),
+      showServiceTier: this.supportsServiceTier(),
+    });
     if (messageId !== undefined) {
       await this.host.messages.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
@@ -445,9 +578,13 @@ export class SettingsCoordinator {
   }
 
   async showModeSettingsPanel(scopeId: string, messageId?: number, locale = this.host.localeForChat(scopeId)): Promise<void> {
+    if (!this.supportsModeSettings()) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'command_not_supported', { name: 'mode' }));
+      return;
+    }
     const settings = this.host.store.getChatSettings(scopeId);
-    const text = formatModeSettingsMessage(locale, scopeId, settings);
-    const keyboard = buildModeSettingsKeyboard(locale, settings);
+    const text = formatModeSettingsMessage(locale, this.host.config.bridgeEngine, scopeId, settings);
+    const keyboard = buildModeSettingsKeyboard(locale, this.host.config.bridgeEngine, settings);
     if (messageId !== undefined) {
       await this.host.messages.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
@@ -456,6 +593,10 @@ export class SettingsCoordinator {
   }
 
   async showAccessSettingsPanel(scopeId: string, messageId?: number, locale = this.host.localeForChat(scopeId)): Promise<void> {
+    if (!this.supportsAccessSettings()) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'command_not_supported', { name: 'permissions' }));
+      return;
+    }
     const access = this.resolveEffectiveAccess(scopeId);
     const text = formatAccessSettingsMessage(locale, access);
     const keyboard = buildAccessSettingsKeyboard(locale, access);
@@ -472,14 +613,26 @@ export class SettingsCoordinator {
     const access = this.resolveEffectiveAccess(scopeId, settings);
     const text = formatSettingsHomeMessage(locale, {
       scopeId,
+      engine: this.host.config.bridgeEngine,
+      instanceId: this.host.config.bridgeInstanceId,
       threadId: binding?.threadId ?? null,
       cwd: binding?.cwd ?? this.host.config.defaultCwd,
       settings,
       access,
       queueDepth: this.host.store.countQueuedTurnInputs(scopeId),
       activeTurnId: this.host.turns.findByScope(scopeId)?.turnId ?? null,
+    }, {
+      showEffort: this.supportsReasoningEffort(),
+      showServiceTier: this.supportsServiceTier(),
+      showMode: this.supportsModeSettings(),
+      showAccess: this.supportsAccessSettings(),
+      showPlanControls: this.supportsGuidedPlan(),
     });
-    const keyboard = buildSettingsHomeKeyboard(locale, settings);
+    const keyboard = buildSettingsHomeKeyboard(locale, settings, {
+      showMode: this.supportsModeSettings(),
+      showAccess: this.supportsAccessSettings(),
+      showPlanControls: this.supportsGuidedPlan(),
+    });
     if (messageId !== undefined) {
       await this.host.messages.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
@@ -501,6 +654,19 @@ export class SettingsCoordinator {
   }
 
   private async handleModeSettingsCallback(event: TelegramCallbackEvent, rawValue: string, locale: AppLocale): Promise<void> {
+    if (this.isGeminiEngine()) {
+      const nextMode = normalizeRequestedGeminiApprovalMode(rawValue);
+      if (!nextMode && rawValue !== 'default') {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      this.host.store.setChatGeminiApprovalMode(event.scopeId, nextMode);
+      await this.refreshModeSettingsPanel(event.scopeId, event.messageId, locale);
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'callback_mode', {
+        value: formatGeminiApprovalModeLabel(locale, nextMode),
+      }));
+      return;
+    }
     const nextMode = normalizeRequestedCollaborationMode(rawValue);
     if (!nextMode && rawValue !== 'default') {
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
@@ -530,8 +696,14 @@ export class SettingsCoordinator {
     await this.host.messages.editHtmlMessage(
       scopeId,
       messageId,
-      formatModelSettingsMessage(locale, resolvedModels, settings),
-      buildModelSettingsKeyboard(locale, resolvedModels, settings),
+      formatModelSettingsMessage(locale, resolvedModels, settings, {
+        showEffort: this.supportsReasoningEffort(),
+        showServiceTier: this.supportsServiceTier(),
+      }),
+      buildModelSettingsKeyboard(locale, resolvedModels, settings, {
+        showEffort: this.supportsReasoningEffort(),
+        showServiceTier: this.supportsServiceTier(),
+      }),
     );
   }
 
@@ -540,8 +712,8 @@ export class SettingsCoordinator {
     await this.host.messages.editHtmlMessage(
       scopeId,
       messageId,
-      formatModeSettingsMessage(locale, scopeId, settings),
-      buildModeSettingsKeyboard(locale, settings),
+      formatModeSettingsMessage(locale, this.host.config.bridgeEngine, scopeId, settings),
+      buildModeSettingsKeyboard(locale, this.host.config.bridgeEngine, settings),
     );
   }
 
@@ -571,21 +743,42 @@ export class SettingsCoordinator {
   }
 }
 
-function whereKeyboard(locale: AppLocale, hasBinding: boolean): Array<Array<{ text: string; callback_data: string }>> {
+function whereKeyboard(
+  locale: AppLocale,
+  options: {
+    hasBinding: boolean;
+    showMode: boolean;
+    showAccess: boolean;
+    showThreads: boolean;
+    showReveal: boolean;
+  },
+): Array<Array<{ text: string; callback_data: string }>> {
   const firstRow = [
-    { text: t(locale, 'button_mode'), callback_data: 'nav:mode' },
-    { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
+    ...(options.showMode ? [{ text: t(locale, 'button_mode'), callback_data: 'nav:mode' }] : []),
+    ...(options.showAccess ? [{ text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }] : []),
   ];
   const secondRow = [
     { text: t(locale, 'button_models'), callback_data: 'nav:models' },
-    { text: t(locale, 'button_threads'), callback_data: 'nav:threads' },
+    ...(options.showThreads ? [{ text: t(locale, 'button_threads'), callback_data: 'nav:threads' }] : []),
   ];
-  if (!hasBinding) {
-    return [firstRow, secondRow];
+  if (!options.hasBinding) {
+    return [firstRow, secondRow].filter((row) => row.length > 0);
   }
-  return [
-    [{ text: t(locale, 'button_reveal'), callback_data: 'nav:reveal' }, { text: t(locale, 'button_mode'), callback_data: 'nav:mode' }],
-    [{ text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }, { text: t(locale, 'button_models'), callback_data: 'nav:models' }],
-    [{ text: t(locale, 'button_threads'), callback_data: 'nav:threads' }],
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  const bindingRow = [
+    ...(options.showReveal ? [{ text: t(locale, 'button_reveal'), callback_data: 'nav:reveal' }] : []),
+    ...(options.showMode ? [{ text: t(locale, 'button_mode'), callback_data: 'nav:mode' }] : []),
   ];
+  if (bindingRow.length > 0) {
+    rows.push(bindingRow);
+  }
+  const settingsRow = [
+    ...(options.showAccess ? [{ text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }] : []),
+    { text: t(locale, 'button_models'), callback_data: 'nav:models' },
+  ];
+  rows.push(settingsRow);
+  if (options.showThreads) {
+    rows.push([{ text: t(locale, 'button_threads'), callback_data: 'nav:threads' }]);
+  }
+  return rows;
 }

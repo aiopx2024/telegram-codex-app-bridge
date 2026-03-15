@@ -1,6 +1,6 @@
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import type { AppLocale, PendingApprovalRecord } from '../types.js';
 import type { TelegramCallbackEvent } from '../telegram/gateway.js';
 import { ApprovalCoordinator } from './approval_coordinator.js';
@@ -22,7 +22,7 @@ import type { ApprovalAction, InlineKeyboard } from './approval_rendering.js';
 interface ApprovalInputHost {
   store: BridgeStore;
   logger: Logger;
-  app: Pick<CodexAppClient, 'respond' | 'respondError'>;
+  app: Pick<EngineProvider, 'respond' | 'respondError'>;
   resolveChatByThread: (threadId: string) => string | null;
   localeForChat: (scopeId: string) => AppLocale;
   shouldAllowInteractiveUserInput: (scopeId: string) => boolean;

@@ -15,7 +15,7 @@ export interface TurnCompletionInfo {
   errorText: string | null;
 }
 
-const RATE_LIMIT_PATTERN = /\b429\b|too many requests|retry after|rate limit|rate[- ]limited/i;
+const RATE_LIMIT_PATTERN = /\b429\b|too many requests|retry after|rate limit|rate[- ]limited|resource[_ -]?exhausted|model[_ -]?capacity[_ -]?exhausted|no capacity available|capacity unavailable/i;
 const QUOTA_PATTERN = /insufficient[_ -]?quota|quota(?:\s+limit)?|usage limit|credit(?:s|\s+balance)?|out of credits|no credits|exhaust(?:ed|ion)|额度|限额|配额/i;
 const AUTH_PATTERN = /unauthori[sz]ed|forbidden|not authenticated|authentication required|login required|sign in|expired session|session expired|token expired|auth(?:entication)? failed|未登录|登录已过期|认证失败/i;
 const INTERRUPTED_PATTERN = /interrupt|interrupted|cancel(?:led)?|aborted?|stopped by user|用户中断|已中断/i;

@@ -24,20 +24,26 @@ export function renderActiveTurnStatus(locale: AppLocale, snapshot: ActiveTurnSt
     return snapshot.toolStatusText;
   }
   if (snapshot.reasoningActive) {
-    return locale === 'zh' ? '正在思考...' : 'Thinking...';
+    return locale === 'zh' ? '正在思考...' : locale === 'fr' ? 'Reflexion en cours...' : 'Thinking...';
   }
   if (snapshot.hasStreamingReply) {
-    return locale === 'zh' ? '正在回复...' : 'Streaming reply...';
+    return locale === 'zh' ? '正在回复...' : locale === 'fr' ? 'Reponse en cours...' : 'Streaming reply...';
   }
-  return locale === 'zh' ? '正在思考...' : 'Thinking...';
+  return locale === 'zh' ? '正在思考...' : locale === 'fr' ? 'Reflexion en cours...' : 'Thinking...';
 }
 
 export function formatApprovalKinds(locale: AppLocale, kinds: ReadonlySet<PendingApprovalRecord['kind']>): string {
-  const values = [...kinds].map(kind => locale === 'zh'
-    ? kind === 'fileChange' ? '文件修改' : '命令执行'
-    : kind === 'fileChange' ? 'file change' : 'command');
+  const values = [...kinds].map((kind) => {
+    if (locale === 'zh') {
+      return kind === 'fileChange' ? '文件修改' : '命令执行';
+    }
+    if (locale === 'fr') {
+      return kind === 'fileChange' ? 'modification de fichiers' : 'commande';
+    }
+    return kind === 'fileChange' ? 'file change' : 'command';
+  });
   if (values.length === 0) {
-    return locale === 'zh' ? '审批' : 'approval';
+    return locale === 'zh' ? '审批' : locale === 'fr' ? 'approbation' : 'approval';
   }
   return values.join(locale === 'zh' ? '、' : ', ');
 }

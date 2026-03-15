@@ -2,7 +2,7 @@ import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { CodexAppClient } from '../codex_app/client.js';
+import type { EngineProvider } from '../engine/types.js';
 import type { TelegramGateway } from '../telegram/gateway.js';
 import type { AppLocale } from '../types.js';
 import { AttachmentBatchCoordinator } from './attachment_batch.js';
@@ -60,7 +60,7 @@ export function createBridgeComposition(
   store: BridgeStore,
   logger: Logger,
   bot: TelegramGateway,
-  app: CodexAppClient,
+  app: EngineProvider,
 ): BridgeComposition {
   const runtime = new BridgeRuntime();
   const locks = new ScopeLockRegistry();
@@ -352,6 +352,8 @@ export function createBridgeComposition(
     lastError: () => runtimeStatus.getLastError(),
     updateStatus,
     config: {
+      bridgeEngine: config.bridgeEngine,
+      bridgeInstanceId: config.bridgeInstanceId,
       codexAppSyncOnOpen: config.codexAppSyncOnOpen,
       codexAppSyncOnTurnComplete: config.codexAppSyncOnTurnComplete,
     },
@@ -383,6 +385,7 @@ export function createBridgeComposition(
     sessions,
     statusCommand,
     messages,
+    providerCapabilities: app.capabilities,
     localeForChat,
     botUsername: () => runtimeStatus.getBotUsername(),
     answerCallback: (callbackQueryId, text) => bot.answerCallback(callbackQueryId, text),

@@ -1,4 +1,4 @@
-import type { JsonRpcNotification } from '../codex_app/client.js';
+import type { EngineNotification } from '../engine/types.js';
 import { classifyTurnCompletion, type TurnCompletionState } from './turn_completion.js';
 
 export interface RawExecCommandEvent {
@@ -73,7 +73,7 @@ export type TurnActivityEvent =
       errorText?: string | null;
     };
 
-export function normalizeTurnActivityEvent(notification: JsonRpcNotification): TurnActivityEvent | null {
+export function normalizeTurnActivityEvent(notification: EngineNotification): TurnActivityEvent | null {
   switch (notification.method) {
     case 'item/started':
       return normalizeStartedEvent(notification.params);

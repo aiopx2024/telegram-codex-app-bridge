@@ -402,13 +402,31 @@ function formatApprovalChangeCounts(locale: AppLocale, raw: unknown): string | n
   const counts = raw as { create?: unknown; update?: unknown; delete?: unknown };
   const parts: string[] = [];
   if (Number(counts.create || 0) > 0) {
-    parts.push(locale === 'zh' ? `新增 ${Number(counts.create)} 个` : `${Number(counts.create)} create`);
+    parts.push(
+      locale === 'zh'
+        ? `新增 ${Number(counts.create)} 个`
+        : locale === 'fr'
+          ? `${Number(counts.create)} ajout`
+          : `${Number(counts.create)} create`,
+    );
   }
   if (Number(counts.update || 0) > 0) {
-    parts.push(locale === 'zh' ? `修改 ${Number(counts.update)} 个` : `${Number(counts.update)} update`);
+    parts.push(
+      locale === 'zh'
+        ? `修改 ${Number(counts.update)} 个`
+        : locale === 'fr'
+          ? `${Number(counts.update)} modification`
+          : `${Number(counts.update)} update`,
+    );
   }
   if (Number(counts.delete || 0) > 0) {
-    parts.push(locale === 'zh' ? `删除 ${Number(counts.delete)} 个` : `${Number(counts.delete)} delete`);
+    parts.push(
+      locale === 'zh'
+        ? `删除 ${Number(counts.delete)} 个`
+        : locale === 'fr'
+          ? `${Number(counts.delete)} suppression`
+          : `${Number(counts.delete)} delete`,
+    );
   }
   return parts.length > 0 ? parts.join(locale === 'zh' ? '，' : ', ') : null;
 }

@@ -1,4 +1,4 @@
-import type { CollaborationModeValue } from '../types.js';
+import type { CollaborationModeValue, GeminiApprovalModeValue } from '../types.js';
 
 export function normalizeRequestedCollaborationMode(value: string): CollaborationModeValue | null {
   const normalized = value.trim().toLowerCase();
@@ -7,6 +7,17 @@ export function normalizeRequestedCollaborationMode(value: string): Collaboratio
   }
   if (normalized === 'plan') {
     return 'plan';
+  }
+  return null;
+}
+
+export function normalizeRequestedGeminiApprovalMode(value: string): GeminiApprovalModeValue | null {
+  const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (!normalized || normalized === 'default') {
+    return null;
+  }
+  if (normalized === 'auto_edit' || normalized === 'yolo' || normalized === 'plan') {
+    return normalized;
   }
   return null;
 }

@@ -35,6 +35,17 @@ test('queued guidance prompt expires and removes its temporary card', async () =
       store,
       turns,
       app: {
+        capabilities: {
+          threads: true,
+          reveal: true,
+          guidedPlan: 'full',
+          approvals: 'full',
+          steerActiveTurn: true,
+          rateLimits: true,
+          reasoningEffort: true,
+          serviceTier: true,
+          reconnect: true,
+        },
         async steerTurn() {
           return { turnId: 'turn-1' };
         },
