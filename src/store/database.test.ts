@@ -222,6 +222,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: null,
       accessPreset: null,
       collaborationMode: null,
+      geminiApprovalMode: null,
       confirmPlanBeforeExecute: true,
       autoQueueMessages: true,
       persistPlanHistory: true,
@@ -237,6 +238,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: null,
       accessPreset: null,
       collaborationMode: null,
+      geminiApprovalMode: null,
       confirmPlanBeforeExecute: true,
       autoQueueMessages: true,
       persistPlanHistory: true,
@@ -252,6 +254,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: null,
       collaborationMode: null,
+      geminiApprovalMode: null,
       confirmPlanBeforeExecute: true,
       autoQueueMessages: true,
       persistPlanHistory: true,
@@ -267,6 +270,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: null,
+      geminiApprovalMode: null,
       confirmPlanBeforeExecute: true,
       autoQueueMessages: true,
       persistPlanHistory: true,
@@ -282,6 +286,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      geminiApprovalMode: null,
       confirmPlanBeforeExecute: true,
       autoQueueMessages: true,
       persistPlanHistory: true,
@@ -297,11 +302,15 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      geminiApprovalMode: null,
       confirmPlanBeforeExecute: true,
       autoQueueMessages: true,
       persistPlanHistory: true,
       updatedAt: store.getChatSettings('chat-3')!.updatedAt,
     });
+
+    store.setChatGeminiApprovalMode('chat-3', 'yolo');
+    assert.equal(store.getChatSettings('chat-3')?.geminiApprovalMode, 'yolo');
 
     store.setChatGuidedPlanPreferences('chat-3', {
       confirmPlanBeforeExecute: false,
@@ -315,6 +324,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      geminiApprovalMode: 'yolo',
       confirmPlanBeforeExecute: false,
       autoQueueMessages: false,
       persistPlanHistory: true,
@@ -330,6 +340,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      geminiApprovalMode: 'yolo',
       confirmPlanBeforeExecute: false,
       autoQueueMessages: false,
       persistPlanHistory: true,
@@ -386,7 +397,7 @@ test('BridgeStore persists pending attachment batches', () => {
   });
 });
 
-test('BridgeStore migrates chat settings to add service tier', () => {
+test('BridgeStore migrates chat settings to add service tier and gemini approval mode', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-migrate-'));
   const dbPath = path.join(tmpDir, 'bridge.sqlite');
   const db = openSqliteDatabase(dbPath);
@@ -415,6 +426,8 @@ test('BridgeStore migrates chat settings to add service tier', () => {
     assert.equal(store.getChatSettings('chat-old')?.serviceTier, null);
     store.setChatServiceTier('chat-old', 'flex');
     assert.equal(store.getChatSettings('chat-old')?.serviceTier, 'flex');
+    store.setChatGeminiApprovalMode('chat-old', 'auto_edit');
+    assert.equal(store.getChatSettings('chat-old')?.geminiApprovalMode, 'auto_edit');
   } finally {
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

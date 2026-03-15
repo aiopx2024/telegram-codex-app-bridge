@@ -21,6 +21,7 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
       locale TEXT,
       access_preset TEXT,
       collaboration_mode TEXT,
+      gemini_approval_mode TEXT,
       confirm_plan_before_execute INTEGER NOT NULL DEFAULT 1,
       auto_queue_messages INTEGER NOT NULL DEFAULT 1,
       persist_plan_history INTEGER NOT NULL DEFAULT 1,
@@ -173,6 +174,7 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
   ensureColumn(db, 'chat_settings', 'service_tier', 'TEXT');
   ensureColumn(db, 'chat_settings', 'access_preset', 'TEXT');
   ensureColumn(db, 'chat_settings', 'collaboration_mode', 'TEXT');
+  ensureColumn(db, 'chat_settings', 'gemini_approval_mode', 'TEXT');
   ensureColumn(db, 'chat_settings', 'confirm_plan_before_execute', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(db, 'chat_settings', 'auto_queue_messages', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(db, 'chat_settings', 'persist_plan_history', 'INTEGER NOT NULL DEFAULT 1');

@@ -6,6 +6,7 @@ import type {
   CachedThread,
   ChatSessionSettings,
   CollaborationModeValue,
+  GeminiApprovalModeValue,
   GuidedPlanSession,
   GuidedPlanSessionState,
   PendingAttachmentBatchRecord,
@@ -95,6 +96,10 @@ export class BridgeStore {
 
   setChatCollaborationMode(chatId: string, collaborationMode: CollaborationModeValue | null): void {
     this.chatState.setChatCollaborationMode(chatId, collaborationMode);
+  }
+
+  setChatGeminiApprovalMode(chatId: string, geminiApprovalMode: GeminiApprovalModeValue | null): void {
+    this.chatState.setChatGeminiApprovalMode(chatId, geminiApprovalMode);
   }
 
   setChatServiceTier(chatId: string, serviceTier: ServiceTierValue | null): void {
