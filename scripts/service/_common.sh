@@ -9,18 +9,59 @@ LEGACY_APP_HOME="${HOME}/.telegram-codex-app-bridge"
 INSTANCES_APP_HOME="${LEGACY_APP_HOME}/instances"
 SERVICE_LABEL_BASE="${SERVICE_LABEL_BASE:-${BRIDGE_SERVICE_LABEL:-$DEFAULT_SERVICE_LABEL}}"
 
+find_node_bin() {
+  local candidate
+  if [[ -n "${NODE_BIN:-}" && -x "${NODE_BIN}" ]]; then
+    printf '%s' "$NODE_BIN"
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return 0
+  fi
+  for candidate in \
+    "${HOME}/.local/bin/node" \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node
+  do
+    if [[ -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  if [[ -d "${HOME}/.local" ]]; then
+    while IFS= read -r candidate; do
+      if [[ -x "$candidate" ]]; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done < <(find "${HOME}/.local" -maxdepth 4 -type f -path '*/bin/node' 2>/dev/null | sort)
+  fi
+  return 1
+}
+
+NODE_BIN="$(find_node_bin || true)"
+NODE_DIR=""
+if [[ -n "$NODE_BIN" ]]; then
+  NODE_DIR="$(cd "$(dirname "$NODE_BIN")" && pwd)"
+  case ":${PATH}:" in
+    *":${NODE_DIR}:"*) ;;
+    *) export PATH="${NODE_DIR}:${PATH}" ;;
+  esac
+fi
+
 load_env_file() {
   if [[ ! -f "$ENV_FILE" ]]; then
     return
   fi
-  if ! command -v node >/dev/null 2>&1; then
+  if [[ -z "$NODE_BIN" ]]; then
     return
   fi
   while IFS= read -r -d '' key && IFS= read -r -d '' value; do
     if [[ -z "${!key+x}" ]]; then
       export "${key}=${value}"
     fi
-  done < <(node - "$ENV_FILE" "$ROOT_DIR" <<'NODE'
+  done < <("$NODE_BIN" - "$ENV_FILE" "$ROOT_DIR" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -116,7 +157,6 @@ LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 SYSTEMD_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 SYSTEMD_UNIT_NAME="${SYSTEMD_UNIT_NAME:-${SERVICE_LABEL}.service}"
 SYSTEMD_UNIT_PATH="${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
-NODE_BIN="$(command -v node || true)"
 PATH_VALUE="${PATH}"
 HOME_VALUE="${HOME}"
 USER_VALUE="${USER:-$(id -un)}"
