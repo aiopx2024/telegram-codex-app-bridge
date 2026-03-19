@@ -22,4 +22,7 @@ case "$(platform_name)" in
     systemctl --user reset-failed >/dev/null 2>&1 || true
     echo "Removed ${SYSTEMD_UNIT_PATH}"
     ;;
+  win32)
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/uninstall.ps1"
+    ;;
 esac

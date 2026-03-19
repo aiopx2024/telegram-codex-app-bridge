@@ -18,4 +18,7 @@ case "$(platform_name)" in
     systemctl --user daemon-reload
     systemctl --user restart "$SYSTEMD_UNIT_NAME"
     ;;
+  win32)
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/restart.ps1"
+    ;;
 esac

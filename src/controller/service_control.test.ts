@@ -69,9 +69,9 @@ function makeHost(overrides: Record<string, unknown> = {}) {
     updateStatus() {
       this.updateStatusCalls += 1;
     },
-    spawnRestartScriptCalls: [] as string[],
-    async spawnRestartScript(scopeId: string) {
-      this.spawnRestartScriptCalls.push(scopeId);
+    spawnRestartScriptCalls: [] as Array<{ scopeId: string; locale: string }>,
+    async spawnRestartScript(scopeId: string, locale: string) {
+      this.spawnRestartScriptCalls.push({ scopeId, locale });
     },
     restartBridgeCalls: 0,
     async restartBridge() {
@@ -121,7 +121,7 @@ test('restart queues the safe restart script for the current scope', async () =>
 
   await service.restart('chat-1', 'zh');
 
-  assert.deepEqual(host.spawnRestartScriptCalls, ['chat-1']);
+  assert.deepEqual(host.spawnRestartScriptCalls, [{ scopeId: 'chat-1', locale: 'zh' }]);
   assert.match(host.sentMessages[0]?.text ?? '', /桥接重启已排队/);
 });
 

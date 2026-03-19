@@ -13,4 +13,7 @@ case "$(platform_name)" in
   linux)
     bash "${SCRIPT_DIR}/install-systemd.sh"
     ;;
+  win32)
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/install.ps1"
+    ;;
 esac

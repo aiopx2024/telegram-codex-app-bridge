@@ -16,4 +16,7 @@ case "$(platform_name)" in
     require_systemd_unit
     systemctl --user stop "$SYSTEMD_UNIT_NAME"
     ;;
+  win32)
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/stop.ps1"
+    ;;
 esac

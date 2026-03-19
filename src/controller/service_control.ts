@@ -5,6 +5,7 @@ import type { EngineProvider } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { RestartMode } from '../platform/capabilities.js';
+import { getServiceRestartScriptCommand } from '../platform/service_scripts.js';
 import type { AccountRateLimitSnapshot, AppLocale } from '../types.js';
 import type { RuntimeStatusStore } from './bridge_runtime.js';
 import { formatRateLimitStatusLines } from './status_command.js';
@@ -12,7 +13,7 @@ import type { TelegramMessageService } from './telegram_message_service.js';
 import { formatUserError } from './utils.js';
 
 const CONTROLLER_DIR = path.dirname(fileURLToPath(import.meta.url));
-const RESTART_SCRIPT_PATH = path.resolve(CONTROLLER_DIR, '../../scripts/service/restart-safe.sh');
+const ROOT_DIR = path.resolve(CONTROLLER_DIR, '../..');
 
 interface ServiceControlHost {
   logger: Logger;
@@ -24,7 +25,7 @@ interface ServiceControlHost {
   runtimeStatus: Pick<RuntimeStatusStore, 'clearLastError' | 'setLastError' | 'getLastError'>;
   updateStatus: () => void;
   restartBridge?: () => Promise<void>;
-  spawnRestartScript?: (scopeId: string) => Promise<void>;
+  spawnRestartScript?: (scopeId: string, locale: AppLocale) => Promise<void>;
 }
 
 export class ServiceControlCoordinator {
@@ -82,9 +83,9 @@ export class ServiceControlCoordinator {
         return;
       }
       if (this.host.spawnRestartScript) {
-        await this.host.spawnRestartScript(scopeId);
+        await this.host.spawnRestartScript(scopeId, locale);
       } else {
-        spawnRestartScript(scopeId);
+        spawnRestartScript(scopeId, locale);
       }
       await this.host.messages.sendMessage(scopeId, t(locale, 'restart_requested'));
     } catch (error) {
@@ -103,15 +104,17 @@ export class ServiceControlCoordinator {
   }
 }
 
-function spawnRestartScript(scopeId: string): void {
-  const child = spawn('/bin/bash', [RESTART_SCRIPT_PATH], {
-    cwd: path.resolve(CONTROLLER_DIR, '../..'),
+function spawnRestartScript(scopeId: string, locale: AppLocale): void {
+  const restartScript = getServiceRestartScriptCommand();
+  const child = spawn(restartScript.command, restartScript.args, {
+    cwd: ROOT_DIR,
     detached: true,
     stdio: 'ignore',
+    windowsHide: true,
     env: {
       ...process.env,
-      DETACH: 'auto',
       NOTIFY_SCOPE_ID: scopeId,
+      NOTIFY_LOCALE: locale,
     },
   });
   child.unref();

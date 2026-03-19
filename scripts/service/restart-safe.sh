@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/service/_common.sh
 source "${SCRIPT_DIR}/_common.sh"
 
+if [[ "$(platform_name)" == "win32" ]]; then
+  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/restart-safe.ps1"
+fi
+
 BUILD_BEFORE_RESTART="${BUILD_BEFORE_RESTART:-true}"
 NOTIFY_TELEGRAM="${NOTIFY_TELEGRAM:-true}"
 RESTART_TIMEOUT_SEC="${RESTART_TIMEOUT_SEC:-90}"

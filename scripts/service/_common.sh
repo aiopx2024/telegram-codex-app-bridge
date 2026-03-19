@@ -168,6 +168,7 @@ platform_name() {
   case "$uname_value" in
     Darwin) echo "darwin" ;;
     Linux) echo "linux" ;;
+    CYGWIN*|MINGW*|MSYS*) echo "win32" ;;
     *) echo "unsupported" ;;
   esac
 }

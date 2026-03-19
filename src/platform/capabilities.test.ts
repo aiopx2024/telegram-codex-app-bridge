@@ -26,11 +26,11 @@ test('detectPlatformCapabilities returns systemd defaults on linux', () => {
   });
 });
 
-test('detectPlatformCapabilities returns in-process restart defaults on Windows', () => {
+test('detectPlatformCapabilities returns Windows service defaults on Windows', () => {
   assert.deepEqual(detectPlatformCapabilities('win32'), {
     os: 'win32',
-    serviceManager: 'manual',
-    restartMode: 'in-process',
+    serviceManager: 'windows-service',
+    restartMode: 'service',
     supportsDesktopOpen: true,
     supportsDeepLink: true,
     supportsAutolaunch: true,

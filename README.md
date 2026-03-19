@@ -19,8 +19,7 @@ The runtime model is fixed:
 - Sticky chat/topic binding, queued follow-ups, staged attachments, and restart-safe recovery
 - Guided plan flow for Codex bots with confirm-or-revise gating
 - Provider-aware `/help`, `/status`, `/settings`, and slash-command registration
-- User-service deployment for Linux (`systemd --user`) and macOS (`launchd`)
-- Manual foreground operation on Windows
+- User-service deployment for Linux (`systemd --user`), macOS (`launchd`), and Windows (`WinSW`)
 
 ## Engine differences
 
@@ -51,7 +50,7 @@ The bridge does not try to fake missing Gemini features. Unsupported commands ar
 - For `gemini` instances:
   - authenticated `gemini` CLI
 
-Windows support is currently `manual` mode only. The bridge can run in the foreground and `/restart` performs an in-process bridge restart, but the service install scripts remain Linux/macOS only.
+Windows services are installed through the bundled PowerShell scripts. The installer writes your current profile paths into the service environment so existing Codex or Gemini CLI auth can still resolve from the same Windows user profile. Foreground mode is still useful for first-run diagnostics, but production Windows deployments should use the service install flow.
 
 ## Instance layout
 
@@ -98,7 +97,7 @@ ENV_FILE=.env.gemini npm run doctor
 ENV_FILE=.env.gemini npm run serve
 ```
 
-Windows PowerShell manual start:
+Windows PowerShell foreground start:
 
 ```powershell
 $env:ENV_FILE=".env.codex"
@@ -158,7 +157,7 @@ GEMINI_HEADLESS_TIMEOUT_MS=300000
 
 ## Service install
 
-Service install is supported on Linux and macOS only. Windows should run the bridge in the foreground or under an external process manager of your choice.
+Service install is supported on Linux, macOS, and Windows.
 
 Linux user service:
 
@@ -179,13 +178,36 @@ ENV_FILE=.env.gemini ./scripts/service/logs.sh
 ENV_FILE=.env.gemini ./scripts/service/restart-safe.sh
 ```
 
-`restart-safe.sh` is instance-aware. It builds, restarts only the targeted service, waits for `running=true` and `connected=true`, then sends a Telegram callback back to the latest active scope.
+`restart-safe.sh` and `restart-safe.ps1` are instance-aware. They build, restart only the targeted service, wait for `running=true` and `connected=true`, then send a Telegram callback back to the latest active scope.
 
 macOS install uses the same `ENV_FILE` pattern:
 
 ```bash
 ENV_FILE=.env.codex ./scripts/service/install.sh
 ```
+
+Windows PowerShell service install:
+
+```powershell
+$env:ENV_FILE=".env.codex"
+npm run build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\install.ps1
+```
+
+Run the installer from an elevated PowerShell session.
+
+Useful Windows service commands:
+
+```powershell
+$env:ENV_FILE=".env.codex"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\status.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\logs.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\restart-safe.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\stop.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\uninstall.ps1
+```
+
+The Windows installer downloads `WinSW-x64.exe` from the official WinSW GitHub releases on first install. Set `WINDOWS_SERVICE_WRAPPER_PATH` to use a pre-downloaded wrapper binary instead, or `WINDOWS_SERVICE_WRAPPER_URL` to pin a specific release URL.
 
 ## Telegram setup
 

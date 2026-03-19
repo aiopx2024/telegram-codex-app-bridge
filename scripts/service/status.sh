@@ -16,4 +16,7 @@ case "$(platform_name)" in
     require_systemd_unit
     systemctl --user status "$SYSTEMD_UNIT_NAME" --no-pager
     ;;
+  win32)
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/status.ps1"
+    ;;
 esac

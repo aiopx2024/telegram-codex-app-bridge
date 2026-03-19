@@ -29,4 +29,7 @@ case "$(platform_name)" in
       journalctl --user -u "$SYSTEMD_UNIT_NAME" -n "$LINES" -f
     fi
     ;;
+  win32)
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${SCRIPT_DIR}/logs.ps1"
+    ;;
 esac

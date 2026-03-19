@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 
-export type ServiceManager = 'launchd' | 'systemd' | 'manual';
+export type ServiceManager = 'launchd' | 'systemd' | 'windows-service' | 'manual';
 export type RestartMode = 'service' | 'in-process' | 'none';
 
 export interface OpenUrlCommand {
@@ -49,8 +49,8 @@ export function detectPlatformCapabilities(platform: NodeJS.Platform = process.p
     case 'win32':
       return {
         os: platform,
-        serviceManager: 'manual',
-        restartMode: 'in-process',
+        serviceManager: 'windows-service',
+        restartMode: 'service',
         supportsDesktopOpen: true,
         supportsDeepLink: true,
         supportsAutolaunch: true,
