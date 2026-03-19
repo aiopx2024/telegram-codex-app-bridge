@@ -57,11 +57,6 @@ function Resolve-NodeBin {
     $candidates.Add($env:NODE_BIN)
   }
 
-  $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-  if ($nodeCommand) {
-    $candidates.Add($nodeCommand.Source)
-  }
-
   $candidates.Add((Join-Path $RootDir '..\tools\node-v24.14.0-win-x64\node.exe'))
   $candidates.Add((Join-Path $RootDir 'tools\node-v24.14.0-win-x64\node.exe'))
 
@@ -72,6 +67,11 @@ function Resolve-NodeBin {
     Get-ChildItem -Path $toolRoot -Filter node.exe -Recurse -ErrorAction SilentlyContinue |
       Sort-Object FullName |
       ForEach-Object { $candidates.Add($_.FullName) }
+  }
+
+  $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+  if ($nodeCommand) {
+    $candidates.Add($nodeCommand.Source)
   }
 
   foreach ($candidate in $candidates) {
@@ -101,25 +101,43 @@ function Get-EnvFileData {
     throw "Env file not found: $EnvFile"
   }
 
-  $script = @"
-const fs = require('node:fs');
-const path = require('node:path');
-const envPath = process.argv[1];
-const rootDir = process.argv[2];
-const dotenv = require(path.join(rootDir, 'node_modules', 'dotenv'));
-const parsed = dotenv.parse(fs.readFileSync(envPath, 'utf8'));
-process.stdout.write(JSON.stringify(parsed));
-"@
-  $json = & $NodeBin -e $script -- $EnvFile $RootDir
-  if ((Get-NativeExitCode) -ne 0) {
-    throw "Failed to parse env file: $EnvFile"
+  $table = @{}
+  foreach ($rawLine in [System.IO.File]::ReadAllLines($EnvFile)) {
+    if ([string]::IsNullOrWhiteSpace($rawLine)) {
+      continue
+    }
+
+    $line = $rawLine.Trim()
+    if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) {
+      continue
+    }
+
+    $separatorIndex = $rawLine.IndexOf('=')
+    if ($separatorIndex -lt 1) {
+      continue
+    }
+
+    $key = $rawLine.Substring(0, $separatorIndex).Trim()
+    if ($key.StartsWith('export ')) {
+      $key = $key.Substring(7).Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($key)) {
+      continue
+    }
+
+    $value = $rawLine.Substring($separatorIndex + 1)
+    if ($value.Length -ge 2) {
+      $first = $value[0]
+      $last = $value[$value.Length - 1]
+      if (($first -eq '"' -and $last -eq '"') -or ($first -eq "'" -and $last -eq "'")) {
+        $value = $value.Substring(1, $value.Length - 2)
+      }
+    }
+
+    $table[$key] = $value
   }
 
-  if ([string]::IsNullOrWhiteSpace($json)) {
-    return @{}
-  }
-
-  return ConvertTo-StringHashtable (ConvertFrom-Json $json)
+  return $table
 }
 
 function Get-EffectiveEnvValue {
@@ -254,6 +272,41 @@ function Get-NativeExitCode {
   }
 
   return 0
+}
+
+function Invoke-NodeScript {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$NodeBin,
+    [Parameter(Mandatory = $true)]
+    [string]$Script,
+    [string[]]$Arguments = @(),
+    [switch]$IgnoreExitCode
+  )
+
+  $tempFile = [System.IO.Path]::GetTempFileName()
+  $scriptPath = [System.IO.Path]::ChangeExtension($tempFile, '.cjs')
+  $outputPath = [System.IO.Path]::ChangeExtension($tempFile, '.out')
+
+  try {
+    Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+    Set-Content -Path $scriptPath -Value $Script -Encoding UTF8
+
+    & $NodeBin $scriptPath @Arguments 1> $outputPath 2>$null
+    $exitCode = Get-NativeExitCode
+    if ($exitCode -ne 0 -and -not $IgnoreExitCode) {
+      throw "Node helper failed with exit code $exitCode."
+    }
+
+    if (-not (Test-Path $outputPath)) {
+      return ''
+    }
+
+    return ([System.IO.File]::ReadAllText($outputPath)).Trim()
+  } finally {
+    Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $outputPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Ensure-WindowsHost {

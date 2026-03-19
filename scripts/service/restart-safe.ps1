@@ -59,21 +59,7 @@ function Invoke-NodeSnippet {
     [switch]$IgnoreExitCode
   )
 
-  $output = & $context.NodeBin -e $Script -- @Arguments 2>$null
-  $exitCode = Get-NativeExitCode
-  if ($exitCode -ne 0 -and -not $IgnoreExitCode) {
-    throw "Node helper failed with exit code $exitCode."
-  }
-
-  if ($output -is [array]) {
-    return (($output -join [Environment]::NewLine).Trim())
-  }
-
-  if ($null -eq $output) {
-    return ''
-  }
-
-  return ([string]$output).Trim()
+  return Invoke-NodeScript -NodeBin $context.NodeBin -Script $Script -Arguments $Arguments -IgnoreExitCode:$IgnoreExitCode
 }
 
 function Normalize-LocaleCode {
