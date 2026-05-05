@@ -18,6 +18,7 @@ import { parseCommand } from './commands.js';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
+  buildThreadListKeyboard,
   buildThreadsKeyboard,
   clampEffortToModel,
   formatAccessPresetLabel,
@@ -34,6 +35,7 @@ import {
   normalizeRequestedEffort,
   resolveCurrentModel,
   resolveRequestedModel,
+  type ThreadListPresentationState,
 } from './presentation.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import {
@@ -183,6 +185,8 @@ export class BridgeSessionCore {
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
+  /** Last threads-panel pagination state per scope (Telegram inline nav + /open index alignment). */
+  private threadListPresentationState = new Map<string, ThreadListPresentationState>();
   private readonly messaging: BridgeMessagingRouter;
 
   constructor(
@@ -569,6 +573,11 @@ export class BridgeSessionCore {
     const interruptMatch = /^turn:interrupt:(.+)$/.exec(event.data);
     if (interruptMatch) {
       await this.handleTurnInterruptCallback(event, interruptMatch[1]!, locale);
+      return;
+    }
+    const listNavMatch = /^thread:list:(prev|next|clear)$/.exec(event.data);
+    if (listNavMatch) {
+      await this.handleThreadListNavigationCallback(event, listNavMatch[1]! as 'prev' | 'next' | 'clear', locale);
       return;
     }
     const threadMatch = /^thread:open:(.+)$/.exec(event.data);
@@ -1860,12 +1869,29 @@ export class BridgeSessionCore {
 
     const threads = this.store.listCachedThreads(scopeId);
     if (threads.length > 0) {
-      await this.editHtmlMessage(
-        scopeId,
-        event.messageId,
-        formatThreadsMessage(locale, threads, binding.threadId),
-        buildThreadsKeyboard(locale, threads),
-      );
+      const threadLikes = threads.map((row) => ({
+        index: row.index,
+        threadId: row.threadId,
+        name: row.name,
+        preview: row.preview,
+        cwd: row.cwd,
+        modelProvider: row.modelProvider,
+        status: row.status,
+        updatedAt: row.updatedAt,
+      }));
+      const state = this.threadListPresentationState.get(scopeId) ?? null;
+      const listState: ThreadListPresentationState = state ?? {
+        offset: 0,
+        pageSize: Math.max(threads.length, 1),
+        hasPreviousPage: false,
+        hasNextPage: false,
+        searchTerm: null,
+      };
+      const text = formatThreadsMessage(locale, threadLikes, binding.threadId, listState.searchTerm, listState);
+      const keyboard = parseWeixinBridgeScope(scopeId)
+        ? buildThreadsKeyboard(locale, threadLikes)
+        : buildThreadListKeyboard(locale, threadLikes, listState);
+      await this.editHtmlMessage(scopeId, event.messageId, text, keyboard);
     }
 
     let callbackText = t(locale, 'thread_opened');
@@ -1980,13 +2006,68 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, text, whereKeyboard(locale, true));
   }
 
-  private async showThreadsPanel(scopeId: string, messageId?: number, searchTerm?: string | null, locale = this.localeForChat(scopeId)): Promise<void> {
+  private async handleThreadListNavigationCallback(
+    event: TelegramCallbackEvent,
+    action: 'prev' | 'next' | 'clear',
+    locale: AppLocale,
+  ): Promise<void> {
+    const state = this.threadListPresentationState.get(event.scopeId) ?? {
+      offset: 0,
+      pageSize: Math.max(1, this.config.threadListLimit),
+      hasPreviousPage: false,
+      hasNextPage: false,
+      searchTerm: null,
+    };
+    const nextOffset = action === 'prev'
+      ? Math.max(0, state.offset - state.pageSize)
+      : action === 'next'
+        ? state.offset + state.pageSize
+        : 0;
+    const nextSearchTerm = action === 'clear' ? null : state.searchTerm;
+    await this.showThreadsPanel(event.scopeId, event.messageId, nextSearchTerm, locale, { offset: nextOffset });
+    await this.messaging.answerCallback(
+      event.callbackQueryId,
+      t(locale, action === 'clear' ? 'threads_filter_cleared_short' : 'decision_recorded'),
+    );
+  }
+
+  private async showThreadsPanel(
+    scopeId: string,
+    messageId?: number,
+    searchTerm?: string | null,
+    locale = this.localeForChat(scopeId),
+    options: { offset?: number } = {},
+  ): Promise<void> {
     const binding = this.store.getBinding(scopeId);
+    const pageSize = Math.max(1, this.config.threadListLimit);
+    const offset = Math.max(0, options.offset ?? 0);
     const threads = await this.app.listThreads({
-      limit: this.config.threadListLimit,
+      limit: offset + pageSize + 1,
       searchTerm: searchTerm ?? null,
     });
-    const cached = threads.map((thread) => ({
+    const visible = threads.slice(offset, offset + pageSize);
+    const hasNextPage = threads.length > offset + visible.length;
+    const presentationState: ThreadListPresentationState = {
+      offset,
+      pageSize,
+      hasPreviousPage: offset > 0,
+      hasNextPage,
+      searchTerm: searchTerm ?? null,
+    };
+    this.threadListPresentationState.set(scopeId, presentationState);
+
+    const cached = visible.map((thread, index) => ({
+      listIndex: offset + index + 1,
+      threadId: thread.threadId,
+      name: thread.name,
+      preview: thread.preview,
+      cwd: thread.cwd,
+      modelProvider: thread.modelProvider,
+      status: thread.status,
+      updatedAt: thread.updatedAt,
+    }));
+    const forDisplay = visible.map((thread, index) => ({
+      index: offset + index + 1,
       threadId: thread.threadId,
       name: thread.name,
       preview: thread.preview,
@@ -1996,16 +2077,18 @@ export class BridgeSessionCore {
       updatedAt: thread.updatedAt,
     }));
     this.store.cacheThreadList(scopeId, cached);
-    let text = formatThreadsMessage(locale, cached, binding?.threadId ?? null, searchTerm ?? null);
+    let text = formatThreadsMessage(locale, forDisplay, binding?.threadId ?? null, searchTerm ?? null, presentationState);
     if (parseWeixinBridgeScope(scopeId)) {
-      const rows = cached.map((row) => ({
+      const rows = forDisplay.map((row) => ({
         threadId: row.threadId,
         name: row.name,
         preview: row.preview,
       }));
-      text += `\n\n${formatWeixinThreadsCopyPaste(locale, rows, searchTerm ?? null)}`;
+      text += `\n\n${formatWeixinThreadsCopyPaste(locale, rows, searchTerm ?? null, offset)}`;
     }
-    const keyboard = buildThreadsKeyboard(locale, cached);
+    const keyboard = parseWeixinBridgeScope(scopeId)
+      ? buildThreadsKeyboard(locale, forDisplay)
+      : buildThreadListKeyboard(locale, forDisplay, presentationState);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;

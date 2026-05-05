@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
+  buildThreadListKeyboard,
   buildThreadsKeyboard,
   clampEffortToModel,
   formatAccessSettingsMessage,
@@ -81,6 +82,82 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
     text: '1. Review auth flow',
     callback_data: 'thread:open:thread-2',
   }]]);
+});
+
+test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
+  const threads: AppThread[] = [
+    {
+      threadId: 'thread-x',
+      name: 'Later page',
+      preview: 'p',
+      cwd: '/tmp',
+      modelProvider: 'openai',
+      source: 'cli',
+      path: '/tmp/x.jsonl',
+      status: 'idle',
+      updatedAt: 1,
+    },
+  ];
+  assert.deepEqual(buildThreadsKeyboard('en', [{ ...threads[0]!, index: 11 } as AppThread & { index: number }]), [[{
+    text: '11. Later page',
+    callback_data: 'thread:open:thread-x',
+  }]]);
+});
+
+test('formatThreadsMessage shows range when listState is set', () => {
+  const threads: AppThread[] = [
+    {
+      threadId: 't1',
+      name: 'A',
+      preview: 'a',
+      cwd: '/tmp',
+      modelProvider: 'openai',
+      source: 'cli',
+      path: '/tmp/t.jsonl',
+      status: 'idle',
+      updatedAt: 1,
+    },
+  ];
+  const rendered = formatThreadsMessage('en', threads, null, null, {
+    offset: 10,
+    pageSize: 10,
+    hasPreviousPage: true,
+    hasNextPage: false,
+    searchTerm: null,
+  });
+  assert.match(rendered, /Showing 11-11/);
+});
+
+test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
+  const row: AppThread & { index: number } = {
+    threadId: 'thread-2',
+    name: 'Review auth flow',
+    preview: 'Review auth flow',
+    cwd: '/tmp/repo',
+    modelProvider: 'openai',
+    source: 'cli',
+    path: '/tmp/repo/thread-2.jsonl',
+    status: 'active',
+    updatedAt: Math.floor(Date.now() / 1000) - 30,
+    index: 11,
+  };
+  assert.deepEqual(
+    buildThreadListKeyboard('en', [row], {
+      offset: 10,
+      pageSize: 10,
+      hasPreviousPage: true,
+      hasNextPage: true,
+      searchTerm: 'auth',
+    }),
+    [
+      [{ text: '11. Review auth flow', callback_data: 'thread:open:thread-2' }],
+      [
+        { text: 'Prev', callback_data: 'thread:list:prev' },
+        { text: 'Next', callback_data: 'thread:list:next' },
+      ],
+      [{ text: 'Clear filter', callback_data: 'thread:list:clear' }],
+    ],
+  );
 });
 
 test('formatModelSettingsMessage renders current selections', () => {
@@ -283,6 +360,16 @@ test('formatWeixinThreadsCopyPaste lists /open lines and filter hint', () => {
   );
   assert.match(withFilter, /Current filter: bug/);
   assert.match(withFilter, /\/open 1\n\/open 2/);
+
+  const paged = formatWeixinThreadsCopyPaste(
+    'en',
+    [
+      { threadId: 'a', name: 'One', preview: 'p1' },
+    ],
+    null,
+    10,
+  );
+  assert.match(paged, /\/open 11/);
 });
 
 test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {

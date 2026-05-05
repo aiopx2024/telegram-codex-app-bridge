@@ -15,6 +15,8 @@ import type { ResolvedAccessMode } from './access.js';
 type InlineButton = { text: string; callback_data: string };
 
 interface ThreadLike {
+  /** 1-based global ordinal for this row (pagination); keyboard and /open must match. */
+  index?: number;
   threadId: string;
   name: string | null;
   preview: string;
@@ -24,11 +26,21 @@ interface ThreadLike {
   updatedAt: number;
 }
 
+/** Pagination + filter context for the threads panel (Telegram inline keyboard). */
+export interface ThreadListPresentationState {
+  offset: number;
+  pageSize: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+  searchTerm: string | null;
+}
+
 export function formatThreadsMessage(
   locale: AppLocale,
   threads: ThreadLike[],
   currentThreadId: string | null,
   searchTerm?: string | null,
+  listState?: ThreadListPresentationState,
 ): string {
   if (threads.length === 0) {
     return searchTerm
@@ -45,6 +57,14 @@ export function formatThreadsMessage(
   if (searchTerm) {
     headerLines.push(t(locale, 'threads_filter', { searchTerm: escapeTelegramHtml(searchTerm) }));
   }
+  if (listState && threads.length > 0) {
+    headerLines.push(
+      t(locale, 'threads_range', {
+        start: listState.offset + 1,
+        end: listState.offset + threads.length,
+      }),
+    );
+  }
   if (currentThread) {
     const currentTitle = truncate(compactWhitespace(currentThread.name || currentThread.preview || t(locale, 'empty')), 40);
     headerLines.push(t(locale, 'threads_current', { title: escapeTelegramHtml(currentTitle) }));
@@ -58,10 +78,36 @@ export function formatThreadsMessage(
 }
 
 export function buildThreadsKeyboard(locale: AppLocale, threads: ThreadLike[]): Array<Array<{ text: string; callback_data: string }>> {
-  return threads.map((thread, index) => [{
-    text: `${index + 1}. ${truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 28)}`,
-    callback_data: `thread:open:${thread.threadId}`,
-  }]);
+  return threads.map((thread, index) => {
+    const ordinal = typeof thread.index === 'number' ? thread.index : index + 1;
+    return [{
+      text: `${ordinal}. ${truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 28)}`,
+      callback_data: `thread:open:${thread.threadId}`,
+    }];
+  });
+}
+
+/** Threads keyboard plus Prev/Next and optional clear-filter row (Telegram only). */
+export function buildThreadListKeyboard(
+  locale: AppLocale,
+  threads: ThreadLike[],
+  listState: ThreadListPresentationState,
+): Array<Array<{ text: string; callback_data: string }>> {
+  const rows = buildThreadsKeyboard(locale, threads);
+  const navigationRow: InlineButton[] = [];
+  if (listState.hasPreviousPage) {
+    navigationRow.push({ text: t(locale, 'button_prev_page'), callback_data: 'thread:list:prev' });
+  }
+  if (listState.hasNextPage) {
+    navigationRow.push({ text: t(locale, 'button_next_page'), callback_data: 'thread:list:next' });
+  }
+  if (navigationRow.length > 0) {
+    rows.push(navigationRow);
+  }
+  if (listState.searchTerm?.trim()) {
+    rows.push([{ text: t(locale, 'button_clear_filter'), callback_data: 'thread:list:clear' }]);
+  }
+  return rows;
 }
 
 export function formatWhereMessage(
@@ -128,6 +174,8 @@ export function formatWeixinThreadsCopyPaste(
   locale: AppLocale,
   threads: WeixinCopyPasteThreadRow[],
   searchTerm?: string | null,
+  /** 0-based offset so /open numbers align with cached global indices when paginating. */
+  pageOffset = 0,
 ): string {
   const lines: string[] = [
     t(locale, 'weixin_copy_paste_divider'),
@@ -140,7 +188,7 @@ export function formatWeixinThreadsCopyPaste(
     lines.push(t(locale, 'weixin_copy_threads_empty'));
   } else {
     for (let i = 0; i < threads.length; i += 1) {
-      lines.push(`/open ${i + 1}`);
+      lines.push(`/open ${pageOffset + i + 1}`);
     }
   }
   lines.push(t(locale, 'weixin_copy_threads_filter_hint'));

@@ -181,7 +181,7 @@ export class BridgeStore {
     return Number(row.count);
   }
 
-  cacheThreadList(chatId: string, threads: Array<Omit<CachedThread, 'index'>>): void {
+  cacheThreadList(chatId: string, threads: Array<Omit<CachedThread, 'index'> & { listIndex?: number }>): void {
     const deleteStmt = this.db.prepare('DELETE FROM thread_cache WHERE chat_id = ?');
     const insertStmt = this.db.prepare(`
       INSERT INTO thread_cache (chat_id, idx, thread_id, name, preview, cwd, model_provider, status, updated_at)
@@ -189,9 +189,10 @@ export class BridgeStore {
     `);
     deleteStmt.run(chatId);
     threads.forEach((thread, index) => {
+      const idx = typeof thread.listIndex === 'number' ? thread.listIndex : index + 1;
       insertStmt.run(
         chatId,
-        index + 1,
+        idx,
         thread.threadId,
         thread.name,
         thread.preview,

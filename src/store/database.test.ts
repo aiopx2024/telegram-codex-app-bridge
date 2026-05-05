@@ -84,6 +84,20 @@ test('BridgeStore caches thread lists and pending approvals', () => {
     });
     assert.equal(store.listCachedThreads(S2).length, 2);
 
+    store.cacheThreadList(S2, [
+      {
+        listIndex: 5,
+        threadId: 'thread-z',
+        name: 'Z',
+        preview: 'z',
+        cwd: null,
+        modelProvider: null,
+        status: 'idle',
+        updatedAt: 300,
+      },
+    ]);
+    assert.deepEqual(store.getCachedThread(S2, 5)?.threadId, 'thread-z');
+
     store.savePendingApproval({
       localId: 'approval-1',
       serverRequestId: '42',
