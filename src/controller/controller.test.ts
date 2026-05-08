@@ -232,6 +232,25 @@ test('queue stores the next prompt while a turn is active', async (t) => {
   assert.equal(rig.sentMessages[1], 'Replaced the queued prompt. I will send the new one after the current turn finishes.');
 });
 
+test('/mode, /plan, and /agent update collaboration mode settings', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/mode'), 'en', 'mode', []);
+  assert.equal(rig.sentMessages[0], 'Current mode: Agent\nUsage: /mode <default|plan>\nAliases: /plan, /agent');
+
+  await (rig.controller as any).handleCommand(createEvent('/mode plan'), 'en', 'mode', ['plan']);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'plan');
+  assert.equal(rig.sentMessages[1], 'Mode set to: Plan\nApplies on the next turn.');
+
+  await (rig.controller as any).handleCommand(createEvent('/agent'), 'en', 'agent', []);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'default');
+  assert.equal(rig.sentMessages[2], 'Mode set to: Agent\nApplies on the next turn.');
+});
+
 test('completed turns automatically start a queued prompt', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

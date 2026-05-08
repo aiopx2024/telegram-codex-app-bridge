@@ -6,6 +6,7 @@ import type {
   AppLocale,
   CachedThread,
   ChatSessionSettings,
+  CollaborationModeValue,
   PendingApprovalRecord,
   ReasoningEffortValue,
   ThreadBinding,
@@ -44,6 +45,7 @@ export class BridgeStore {
         reasoning_effort TEXT,
         locale TEXT,
         access_preset TEXT,
+        collaboration_mode TEXT,
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS thread_cache (
@@ -101,6 +103,7 @@ export class BridgeStore {
     this.ensureColumn('thread_cache', 'status', "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn('chat_settings', 'locale', 'TEXT');
     this.ensureColumn('chat_settings', 'access_preset', 'TEXT');
+    this.ensureColumn('chat_settings', 'collaboration_mode', 'TEXT');
     migrateLegacyBridgeScopeIds(this.db);
   }
 
@@ -137,7 +140,7 @@ export class BridgeStore {
   }
 
   getChatSettings(chatId: string): ChatSessionSettings | null {
-    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, access_preset, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
+    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
     if (!row) return null;
     return {
       chatId: String(row.chat_id),
@@ -145,6 +148,7 @@ export class BridgeStore {
       reasoningEffort: row.reasoning_effort === null ? null : String(row.reasoning_effort) as ReasoningEffortValue,
       locale: row.locale === null ? null : String(row.locale) as AppLocale,
       accessPreset: row.access_preset === null ? null : String(row.access_preset) as AccessPresetValue,
+      collaborationMode: normalizeCollaborationMode(row.collaboration_mode),
       updatedAt: Number(row.updated_at),
     };
   }
@@ -152,12 +156,12 @@ export class BridgeStore {
   setChatSettings(chatId: string, model: string | null, reasoningEffort: ReasoningEffortValue | null, locale?: AppLocale | null): void {
     const current = this.getChatSettings(chatId);
     const nextLocale = locale === undefined ? current?.locale ?? null : locale;
-    this.writeChatSettings(chatId, model, reasoningEffort, nextLocale, current?.accessPreset ?? null);
+    this.writeChatSettings(chatId, model, reasoningEffort, nextLocale, current?.accessPreset ?? null, current?.collaborationMode ?? null);
   }
 
   setChatLocale(chatId: string, locale: AppLocale): void {
     const current = this.getChatSettings(chatId);
-    this.writeChatSettings(chatId, current?.model ?? null, current?.reasoningEffort ?? null, locale, current?.accessPreset ?? null);
+    this.writeChatSettings(chatId, current?.model ?? null, current?.reasoningEffort ?? null, locale, current?.accessPreset ?? null, current?.collaborationMode ?? null);
   }
 
   setChatAccessPreset(chatId: string, accessPreset: AccessPresetValue | null): void {
@@ -168,6 +172,19 @@ export class BridgeStore {
       current?.reasoningEffort ?? null,
       current?.locale ?? null,
       accessPreset,
+      current?.collaborationMode ?? null,
+    );
+  }
+
+  setChatCollaborationMode(chatId: string, collaborationMode: CollaborationModeValue | null): void {
+    const current = this.getChatSettings(chatId);
+    this.writeChatSettings(
+      chatId,
+      current?.model ?? null,
+      current?.reasoningEffort ?? null,
+      current?.locale ?? null,
+      current?.accessPreset ?? null,
+      collaborationMode,
     );
   }
 
@@ -350,17 +367,19 @@ export class BridgeStore {
     reasoningEffort: ReasoningEffortValue | null,
     locale: AppLocale | null,
     accessPreset: AccessPresetValue | null,
+    collaborationMode: CollaborationModeValue | null,
   ): void {
     this.db.prepare(`
-      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET
         model = excluded.model,
         reasoning_effort = excluded.reasoning_effort,
         locale = excluded.locale,
         access_preset = excluded.access_preset,
+        collaboration_mode = excluded.collaboration_mode,
         updated_at = excluded.updated_at
-    `).run(chatId, model, reasoningEffort, locale, accessPreset, Date.now());
+    `).run(chatId, model, reasoningEffort, locale, accessPreset, collaborationMode, Date.now());
   }
 
   getWeixinContextToken(scopeId: string): string | null {
@@ -385,4 +404,8 @@ export class BridgeStore {
     }
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+function normalizeCollaborationMode(value: unknown): CollaborationModeValue | null {
+  return value === 'default' || value === 'plan' ? value : null;
 }

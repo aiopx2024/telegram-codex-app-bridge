@@ -101,3 +101,33 @@ test('diffObservedTurn completes earlier commentary items once a later item appe
   ]);
   assert.equal(diff.events.at(-1)?.kind, 'agent_message_completed');
 });
+
+test('diffObservedTurn relays plan items as commentary', () => {
+  const diff = diffObservedTurn(null, {
+    turnId: 'turn-1',
+    status: 'completed',
+    error: null,
+    items: [
+      {
+        itemId: 'plan-1',
+        type: 'plan',
+        phase: null,
+        text: '1. Inspect\n2. Report',
+        command: null,
+        status: null,
+        aggregatedOutput: null,
+      },
+    ],
+  }, false);
+
+  assert.deepEqual(diff.events.map((event) => event.kind), [
+    'agent_message_started',
+    'agent_message_delta',
+    'agent_message_completed',
+  ]);
+  assert.deepEqual(diff.events.map((event) => 'outputKind' in event ? event.outputKind : null), [
+    'commentary',
+    'commentary',
+    'commentary',
+  ]);
+});

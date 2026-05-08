@@ -152,41 +152,11 @@ function applySessionRecord(
   }
 
   if (type === 'event_msg' && payload?.type === 'agent_message' && typeof payload.message === 'string') {
-    const itemId = buildSessionItemId(activeTurnId, cursor.nextMessageIndex + 1);
-    const phase = typeof payload.phase === 'string' ? payload.phase : null;
-    const outputKind = classifyAgentOutput(phase, true);
-    return {
-      cursor: {
-        activeTurnId,
-        nextMessageIndex: cursor.nextMessageIndex + 1,
-      },
-      events: [
-        {
-          kind: 'agent_message_started',
-          turnId: activeTurnId,
-          itemId,
-          phase,
-          outputKind: classifyAgentOutput(phase, false),
-        },
-        {
-          kind: 'agent_message_delta',
-          turnId: activeTurnId,
-          itemId,
-          delta: payload.message,
-          outputKind: classifyAgentOutput(phase, false),
-        },
-        {
-          kind: 'agent_message_completed',
-          turnId: activeTurnId,
-          itemId,
-          phase,
-          text: payload.message,
-          outputKind,
-        },
-      ],
-      startedTurnId: null,
-      turnCompleted: false,
-    };
+    return createSessionTextEvents(activeTurnId, cursor, payload.message, typeof payload.phase === 'string' ? payload.phase : null, false);
+  }
+
+  if (type === 'response_item' && payload?.type === 'plan' && typeof payload.text === 'string') {
+    return createSessionTextEvents(activeTurnId, cursor, payload.text, 'commentary', true);
   }
 
   if (type === 'event_msg' && payload?.type === 'user_message' && typeof payload.message === 'string') {
@@ -265,6 +235,55 @@ function applySessionRecord(
 
 function buildSessionItemId(turnId: string, index: number): string {
   return `${turnId}:session:${index}`;
+}
+
+function createSessionTextEvents(
+  activeTurnId: string,
+  cursor: SessionLogCursor,
+  text: string,
+  phase: string | null,
+  forceCommentary: boolean,
+): {
+  cursor: SessionLogCursor;
+  events: TurnActivityEvent[];
+  startedTurnId: string | null;
+  turnCompleted: boolean;
+} {
+  const itemId = buildSessionItemId(activeTurnId, cursor.nextMessageIndex + 1);
+  const outputKind = forceCommentary ? 'commentary' : classifyAgentOutput(phase, true);
+  const streamOutputKind = forceCommentary ? 'commentary' : classifyAgentOutput(phase, false);
+  return {
+    cursor: {
+      activeTurnId,
+      nextMessageIndex: cursor.nextMessageIndex + 1,
+    },
+    events: [
+      {
+        kind: 'agent_message_started',
+        turnId: activeTurnId,
+        itemId,
+        phase,
+        outputKind: streamOutputKind,
+      },
+      {
+        kind: 'agent_message_delta',
+        turnId: activeTurnId,
+        itemId,
+        delta: text,
+        outputKind: streamOutputKind,
+      },
+      {
+        kind: 'agent_message_completed',
+        turnId: activeTurnId,
+        itemId,
+        phase,
+        text,
+        outputKind,
+      },
+    ],
+    startedTurnId: null,
+    turnCompleted: false,
+  };
 }
 
 function createExecStartEvent(turnId: string, payload: any): RawExecCommandEvent | null {

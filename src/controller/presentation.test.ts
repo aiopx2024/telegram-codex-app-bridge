@@ -178,6 +178,7 @@ test('formatModelSettingsMessage renders current selections', () => {
     reasoningEffort: 'high',
     locale: 'en',
     accessPreset: null,
+    collaborationMode: null,
     updatedAt: Date.now(),
   };
 
@@ -215,6 +216,7 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
     reasoningEffort: 'high',
     locale: 'en',
     accessPreset: null,
+    collaborationMode: null,
     updatedAt: Date.now(),
   };
 
@@ -335,6 +337,7 @@ test('presentation renders chinese locale strings', () => {
     reasoningEffort: null,
     locale: 'zh',
     accessPreset: null,
+    collaborationMode: null,
     updatedAt: Date.now(),
   };
   const renderedModels = formatModelSettingsMessage('zh', models, settings);
@@ -399,6 +402,7 @@ test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
     reasoningEffort: 'high',
     locale: 'en',
     accessPreset: null,
+    collaborationMode: null,
     updatedAt: 0,
   });
   assert.match(out, /\/model default/);

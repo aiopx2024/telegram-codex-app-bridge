@@ -41,10 +41,12 @@ interface StartThreadOptions {
   approvalPolicy: string;
   sandboxMode: SandboxModeValue;
   model: string | null;
+  developerInstructions: string | null;
 }
 
 interface ResumeThreadOptions {
   threadId: string;
+  developerInstructions: string | null;
 }
 
 export interface TextTurnInput {
@@ -151,7 +153,7 @@ export class CodexAppClient extends EventEmitter {
       config: null,
       serviceName: null,
       baseInstructions: null,
-      developerInstructions: null,
+      developerInstructions: options.developerInstructions,
       personality: null,
       ephemeral: null,
       experimentalRawEvents: true,
@@ -166,7 +168,7 @@ export class CodexAppClient extends EventEmitter {
       cwd: null,
       approvalPolicy: null,
       baseInstructions: null,
-      developerInstructions: null,
+      developerInstructions: options.developerInstructions,
       config: null,
       sandbox: null,
       model: null,
@@ -190,7 +192,6 @@ export class CodexAppClient extends EventEmitter {
       summary: null,
       personality: null,
       outputSchema: null,
-      collaborationMode: null,
     });
     return (result as any).turn;
   }

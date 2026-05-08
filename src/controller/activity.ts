@@ -81,8 +81,12 @@ export function normalizeTurnActivityEvent(notification: JsonRpcNotification): T
       return normalizeStartedEvent(notification.params);
     case 'item/agentMessage/delta':
       return normalizeAgentDeltaEvent(notification.params);
+    case 'item/plan/delta':
+      return normalizePlanDeltaEvent(notification.params);
     case 'item/completed':
       return normalizeCompletedEvent(notification.params);
+    case 'turn/plan/updated':
+      return normalizePlanUpdatedEvent(notification.params);
     case 'codex/event/exec_command_begin':
       return normalizeToolEvent(notification.params, 'tool_started');
     case 'codex/event/exec_command_end':
@@ -113,18 +117,18 @@ function normalizeStartedEvent(params: any): TurnActivityEvent | null {
       state: 'thinking',
     };
   }
-  if (itemType !== 'agentmessage' && itemType !== 'assistantmessage') {
+  if (!isRelayableTextItemType(itemType)) {
     return null;
   }
   const itemId = extractItemId(item);
   if (!itemId) return null;
-  const phase = extractAgentPhase(item);
+  const phase = itemType === 'plan' ? 'commentary' : extractAgentPhase(item);
   return {
     kind: 'agent_message_started',
     turnId,
     itemId,
     phase,
-    outputKind: classifyAgentOutput(phase, false),
+    outputKind: outputKindForItemType(itemType, phase, false),
   };
 }
 
@@ -145,6 +149,22 @@ function normalizeAgentDeltaEvent(params: any): TurnActivityEvent | null {
   };
 }
 
+function normalizePlanDeltaEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  const delta = extractAgentDeltaText(params);
+  const itemId = extractItemId(params);
+  if (!turnId || !delta || !itemId) {
+    return null;
+  }
+  return {
+    kind: 'agent_message_delta',
+    turnId,
+    itemId,
+    delta,
+    outputKind: 'commentary',
+  };
+}
+
 function normalizeCompletedEvent(params: any): TurnActivityEvent | null {
   const turnId = extractTurnId(params);
   if (!turnId) return null;
@@ -157,19 +177,38 @@ function normalizeCompletedEvent(params: any): TurnActivityEvent | null {
       state: 'thinking',
     };
   }
-  if (itemType !== 'agentmessage' && itemType !== 'assistantmessage') {
+  if (!isRelayableTextItemType(itemType)) {
     return null;
   }
   const itemId = extractItemId(item);
   if (!itemId) return null;
-  const phase = extractAgentPhase(item);
+  const phase = itemType === 'plan' ? 'commentary' : extractAgentPhase(item);
   return {
     kind: 'agent_message_completed',
     turnId,
     itemId,
     phase,
     text: extractCompletedAgentText(params),
-    outputKind: classifyAgentOutput(phase, true),
+    outputKind: outputKindForItemType(itemType, phase, true),
+  };
+}
+
+function normalizePlanUpdatedEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  if (!turnId) {
+    return null;
+  }
+  const text = formatPlanUpdateText(params);
+  if (!text) {
+    return null;
+  }
+  return {
+    kind: 'agent_message_completed',
+    turnId,
+    itemId: `${turnId}:plan`,
+    phase: 'commentary',
+    text,
+    outputKind: 'commentary',
   };
 }
 
@@ -290,7 +329,7 @@ function extractAgentDeltaText(params: any): string | null {
 
 function extractCompletedAgentText(params: any): string | null {
   const itemType = normalizeEventItemType(params?.item ?? params);
-  if (itemType !== 'agentmessage' && itemType !== 'assistantmessage') {
+  if (!isRelayableTextItemType(itemType)) {
     return null;
   }
   const item = params?.item ?? params;
@@ -301,6 +340,35 @@ function extractCompletedAgentText(params: any): string | null {
     return directText;
   }
   return '';
+}
+
+function isRelayableTextItemType(itemType: string | null): boolean {
+  return itemType === 'agentmessage' || itemType === 'assistantmessage' || itemType === 'plan';
+}
+
+function outputKindForItemType(itemType: string | null, phase: string | null, completed: boolean): TurnOutputKind {
+  if (itemType === 'plan') {
+    return 'commentary';
+  }
+  return classifyAgentOutput(phase, completed);
+}
+
+function formatPlanUpdateText(params: any): string | null {
+  const lines: string[] = [];
+  const explanation = extractTextCandidate(params?.explanation);
+  if (explanation) {
+    lines.push(explanation);
+  }
+  const plan = Array.isArray(params?.plan) ? params.plan : [];
+  for (const entry of plan) {
+    const step = extractTextCandidate(entry?.step);
+    if (!step) {
+      continue;
+    }
+    const status = typeof entry?.status === 'string' && entry.status ? ` [${entry.status}]` : '';
+    lines.push(`- ${step}${status}`);
+  }
+  return lines.join('\n').trim() || null;
 }
 
 function normalizeEventItemType(value: any): string | null {

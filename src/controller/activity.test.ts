@@ -51,6 +51,59 @@ test('normalizes agent message lifecycle notifications', () => {
   });
 });
 
+test('normalizes plan notifications as commentary', () => {
+  const delta = normalizeTurnActivityEvent({
+    method: 'item/plan/delta',
+    params: {
+      turnId: 'turn-1',
+      itemId: 'plan-1',
+      delta: 'Inspecting current deployment.',
+    },
+  });
+  const completed = normalizeTurnActivityEvent({
+    method: 'item/completed',
+    params: {
+      turnId: 'turn-1',
+      item: { id: 'plan-1', type: 'plan', text: '1. Check logs\n2. Restart service' },
+    },
+  });
+  const updated = normalizeTurnActivityEvent({
+    method: 'turn/plan/updated',
+    params: {
+      turnId: 'turn-1',
+      explanation: 'Plan:',
+      plan: [
+        { step: 'Check logs', status: 'completed' },
+        { step: 'Restart service', status: 'pending' },
+      ],
+    },
+  });
+
+  assert.deepEqual(delta, {
+    kind: 'agent_message_delta',
+    turnId: 'turn-1',
+    itemId: 'plan-1',
+    delta: 'Inspecting current deployment.',
+    outputKind: 'commentary',
+  });
+  assert.deepEqual(completed, {
+    kind: 'agent_message_completed',
+    turnId: 'turn-1',
+    itemId: 'plan-1',
+    phase: 'commentary',
+    text: '1. Check logs\n2. Restart service',
+    outputKind: 'commentary',
+  });
+  assert.deepEqual(updated, {
+    kind: 'agent_message_completed',
+    turnId: 'turn-1',
+    itemId: 'turn-1:plan',
+    phase: 'commentary',
+    text: 'Plan:\n- Check logs [completed]\n- Restart service [pending]',
+    outputKind: 'commentary',
+  });
+});
+
 test('normalizes raw tool command events into activity states', () => {
   const event = normalizeTurnActivityEvent({
     method: 'codex/event/exec_command_begin',

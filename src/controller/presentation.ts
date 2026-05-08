@@ -6,6 +6,7 @@ import type {
   AppThread,
   ApprovalPolicyValue,
   ChatSessionSettings,
+  CollaborationModeValue,
   ModelInfo,
   ReasoningEffortValue,
   SandboxModeValue,
@@ -123,6 +124,7 @@ export function formatWhereMessage(
     t(locale, 'where_preview', { value: thread.preview || t(locale, 'empty') }),
     t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
     t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+    t(locale, 'where_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
     t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
     t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
     t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
@@ -131,6 +133,10 @@ export function formatWhereMessage(
     t(locale, 'where_cwd', { value: thread.cwd ?? defaultCwd }),
     t(locale, 'where_updated', { value: formatIsoTime(locale, thread.updatedAt) }),
   ].join('\n');
+}
+
+export function formatCollaborationModeLabel(locale: AppLocale, mode: CollaborationModeValue | null | undefined): string {
+  return t(locale, mode === 'plan' ? 'collaboration_mode_plan' : 'collaboration_mode_default');
 }
 
 export function formatAccessSettingsMessage(locale: AppLocale, access: ResolvedAccessMode): string {

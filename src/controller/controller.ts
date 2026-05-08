@@ -7,6 +7,7 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type {
   AppLocale,
+  CollaborationModeValue,
   ModelInfo,
   PendingApprovalRecord,
   ReasoningEffortValue,
@@ -24,6 +25,7 @@ import {
   formatAccessPresetLabel,
   formatAccessSettingsMessage,
   formatApprovalPolicyLabel,
+  formatCollaborationModeLabel,
   formatModelSettingsMessage,
   formatSandboxModeLabel,
   formatThreadsMessage,
@@ -175,6 +177,12 @@ type ApprovalAction = 'accept' | 'session' | 'deny';
 class UserFacingError extends Error {}
 const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
+const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
+const PLAN_MODE_DEVELOPER_INSTRUCTIONS = [
+  '<collaboration_mode>Plan</collaboration_mode>',
+  'In Plan mode, inspect and reason as needed, then present a concise plan before making code, file, git, or deployment changes. Ask the user to switch back to Agent mode before implementation work.',
+].join('\n');
+const AGENT_MODE_DEVELOPER_INSTRUCTIONS = '<collaboration_mode>Default</collaboration_mode>';
 
 export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
@@ -182,7 +190,7 @@ export class BridgeSessionCore {
   private queuedPrompts = new Map<string, QueuedPromptRequest>();
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
-  private attachedThreads = new Set<string>();
+  private attachedThreads = new Map<string, CollaborationModeValue>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
   /** Last threads-panel pagination state per scope (Telegram inline nav + /open index alignment). */
@@ -367,6 +375,9 @@ export class BridgeSessionCore {
           '/takeover <message>',
           '/queue <message>',
           '/new [cwd]',
+          '/mode [default|plan]',
+          '/plan',
+          '/agent',
           '/models',
           '/permissions',
           '/permissions <read-only|default|full-access>',
@@ -392,6 +403,7 @@ export class BridgeSessionCore {
           t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+          t(locale, 'status_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
           t(locale, 'status_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
           t(locale, 'status_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
           t(locale, 'status_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
@@ -499,6 +511,18 @@ export class BridgeSessionCore {
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
         ].join('\n'));
+        return;
+      }
+      case 'mode': {
+        await this.handleModeCommand(scopeId, locale, args);
+        return;
+      }
+      case 'plan': {
+        await this.setCollaborationMode(scopeId, locale, 'plan');
+        return;
+      }
+      case 'agent': {
+        await this.setCollaborationMode(scopeId, locale, 'default');
         return;
       }
       case 'model': {
@@ -721,6 +745,7 @@ export class BridgeSessionCore {
       approvalPolicy: access.approvalPolicy,
       sandboxMode: access.sandboxMode,
       model: settings?.model ?? null,
+      developerInstructions: developerInstructionsForCollaborationMode(settings?.collaborationMode ?? null),
     });
     return this.storeThreadSession(scopeId, session, 'seed');
   }
@@ -1208,11 +1233,17 @@ export class BridgeSessionCore {
   }
 
   private async ensureThreadReady(scopeId: string, binding: ThreadBinding): Promise<ThreadBinding> {
-    if (this.attachedThreads.has(binding.threadId)) {
+    const settings = this.store.getChatSettings(scopeId);
+    const mode = resolveCollaborationMode(settings?.collaborationMode ?? null);
+    const attachmentKey = attachedThreadKey(scopeId, binding.threadId);
+    if (this.attachedThreads.get(attachmentKey) === mode) {
       return binding;
     }
     try {
-      const session = await this.app.resumeThread({ threadId: binding.threadId });
+      const session = await this.app.resumeThread({
+        threadId: binding.threadId,
+        developerInstructions: developerInstructionsForCollaborationMode(mode),
+      });
       return this.storeThreadSession(scopeId, session, 'seed');
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
@@ -1293,7 +1324,11 @@ export class BridgeSessionCore {
   }
 
   private async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
-    const session = await this.app.resumeThread({ threadId });
+    const settings = this.store.getChatSettings(scopeId);
+    const session = await this.app.resumeThread({
+      threadId,
+      developerInstructions: developerInstructionsForCollaborationMode(settings?.collaborationMode ?? null),
+    });
     return this.storeThreadSession(scopeId, session, 'replace');
   }
 
@@ -1314,7 +1349,7 @@ export class BridgeSessionCore {
     };
     this.store.setBinding(scopeId, normalized.threadId, normalized.cwd);
     this.store.setChatSettings(scopeId, model, effort);
-    this.attachedThreads.add(normalized.threadId);
+    this.attachedThreads.set(attachedThreadKey(scopeId, normalized.threadId), resolveCollaborationMode(this.store.getChatSettings(scopeId)?.collaborationMode ?? null));
     this.updateStatus();
     return normalized;
   }
@@ -1753,6 +1788,32 @@ export class BridgeSessionCore {
     );
   }
 
+  private async handleModeCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const raw = args.join(' ').trim();
+    if (!raw) {
+      const settings = this.store.getChatSettings(scopeId);
+      await this.sendMessage(scopeId, [
+        t(locale, 'mode_current', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
+        t(locale, 'usage_mode'),
+      ].join('\n'));
+      return;
+    }
+    const mode = normalizeRequestedCollaborationMode(raw);
+    if (!mode) {
+      await this.sendMessage(scopeId, t(locale, 'usage_mode'));
+      return;
+    }
+    await this.setCollaborationMode(scopeId, locale, mode);
+  }
+
+  private async setCollaborationMode(scopeId: string, locale: AppLocale, mode: CollaborationModeValue): Promise<void> {
+    this.store.setChatCollaborationMode(scopeId, mode);
+    await this.sendMessage(scopeId, [
+      t(locale, 'mode_configured', { value: formatCollaborationModeLabel(locale, mode) }),
+      t(locale, 'applies_next_turn'),
+    ].join('\n'));
+  }
+
   private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
     const scopeId = event.scopeId;
     if (args.length === 0) {
@@ -1964,6 +2025,7 @@ export class BridgeSessionCore {
         t(locale, 'where_no_thread_bound'),
         t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
         t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+        t(locale, 'where_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
         t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
         t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
         t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
@@ -3133,6 +3195,31 @@ function formatUserError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function normalizeRequestedCollaborationMode(value: string): CollaborationModeValue | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'plan') {
+    return 'plan';
+  }
+  if (normalized === 'default' || normalized === 'agent') {
+    return 'default';
+  }
+  return null;
+}
+
+function resolveCollaborationMode(mode: CollaborationModeValue | null | undefined): CollaborationModeValue {
+  return mode ?? DEFAULT_COLLABORATION_MODE;
+}
+
+function developerInstructionsForCollaborationMode(mode: CollaborationModeValue | null | undefined): string {
+  return resolveCollaborationMode(mode) === 'plan'
+    ? PLAN_MODE_DEVELOPER_INSTRUCTIONS
+    : AGENT_MODE_DEVELOPER_INSTRUCTIONS;
+}
+
+function attachedThreadKey(scopeId: string, threadId: string): string {
+  return `${scopeId}:${threadId}`;
 }
 
 function isThreadNotFoundError(error: unknown): boolean {

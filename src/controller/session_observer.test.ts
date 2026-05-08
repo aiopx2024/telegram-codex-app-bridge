@@ -89,6 +89,29 @@ test('applySessionLog emits tool and completion events for appended lines', () =
   assert.equal(diff.cursor.nextMessageIndex, 0);
 });
 
+test('applySessionLog relays plan response items as commentary', () => {
+  const diff = applySessionLog([
+    JSON.stringify({
+      type: 'response_item',
+      payload: { type: 'plan', text: '1. Inspect\n2. Report' },
+    }),
+  ], {
+    activeTurnId: 'turn-2',
+    nextMessageIndex: 0,
+  });
+
+  assert.deepEqual(diff.events.map(event => event.kind), [
+    'agent_message_started',
+    'agent_message_delta',
+    'agent_message_completed',
+  ]);
+  assert.deepEqual(diff.events.map(event => 'outputKind' in event ? event.outputKind : null), [
+    'commentary',
+    'commentary',
+    'commentary',
+  ]);
+});
+
 test('splitJsonlChunk preserves incomplete trailing lines', () => {
   const split = splitJsonlChunk('', '{"a":1}\n{"b":2}');
   assert.deepEqual(split.lines, ['{"a":1}']);

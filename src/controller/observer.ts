@@ -1,5 +1,5 @@
 import type { AppThreadSnapshot, AppTurnItemSnapshot, AppTurnSnapshot } from '../types.js';
-import { classifyAgentOutput, type TurnActivityEvent } from './activity.js';
+import { classifyAgentOutput, type TurnActivityEvent, type TurnOutputKind } from './activity.js';
 
 export interface ObservedTurnCursor {
   turnId: string;
@@ -57,7 +57,7 @@ export function diffObservedTurn(
         turnId: turn.turnId,
         itemId: item.itemId,
         phase: item.phase,
-        outputKind: classifyAgentOutput(item.phase, false),
+        outputKind: classifyObservedOutput(item, false),
       });
       if (nextText) {
         events.push({
@@ -65,7 +65,7 @@ export function diffObservedTurn(
           turnId: turn.turnId,
           itemId: item.itemId,
           delta: nextText,
-          outputKind: classifyAgentOutput(item.phase, false),
+          outputKind: classifyObservedOutput(item, false),
         });
       }
     } else if (nextText.length > previousText.length) {
@@ -74,7 +74,7 @@ export function diffObservedTurn(
         turnId: turn.turnId,
         itemId: item.itemId,
         delta: nextText.slice(previousText.length),
-        outputKind: classifyAgentOutput(item.phase, false),
+        outputKind: classifyObservedOutput(item, false),
       });
     }
     baseCursor.itemTexts[item.itemId] = nextText;
@@ -93,7 +93,7 @@ export function diffObservedTurn(
       itemId: item.itemId,
       phase: item.phase,
       text: baseCursor.itemTexts[item.itemId] ?? item.text ?? null,
-      outputKind: classifyAgentOutput(item.phase, true),
+      outputKind: classifyObservedOutput(item, true),
     });
   }
 
@@ -111,5 +111,9 @@ export function diffObservedTurn(
 
 function isRelayableAgentItem(item: AppTurnItemSnapshot): boolean {
   const normalizedType = item.type.toLowerCase();
-  return normalizedType === 'agentmessage' || normalizedType === 'assistantmessage';
+  return normalizedType === 'agentmessage' || normalizedType === 'assistantmessage' || normalizedType === 'plan';
+}
+
+function classifyObservedOutput(item: AppTurnItemSnapshot, completed: boolean): TurnOutputKind {
+  return item.type.toLowerCase() === 'plan' ? 'commentary' : classifyAgentOutput(item.phase, completed);
 }
